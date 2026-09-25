@@ -7,3 +7,4 @@ jsconfig.json
 .gitignore
 node_modules/
 test/
+publish-openvsx.sh
