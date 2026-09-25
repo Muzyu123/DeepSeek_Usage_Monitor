@@ -1,0 +1,121 @@
+{
+  "name": "deepseek-usage-monitor",
+  "displayName": "DeepSeek Usage Monitor",
+  "description": "%extension.description%",
+  "version": "1.1.0",
+  "publisher": "Muzyu",
+  "license": "MIT",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YOUR-GITHUB-USER/deepseek-usage-monitor"
+  },
+  "bugs": {
+    "url": "https://github.com/YOUR-GITHUB-USER/deepseek-usage-monitor/issues"
+  },
+  "homepage": "https://github.com/YOUR-GITHUB-USER/deepseek-usage-monitor#readme",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "deepseek",
+    "usage",
+    "token",
+    "cost",
+    "dashboard"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "DeepSeek Usage Monitor",
+      "properties": {
+        "deepseek-usage-monitor.sessionToken": {
+          "type": "string",
+          "default": "",
+          "description": "%config.sessionToken.description%",
+          "order": 2
+        },
+        "deepseek-usage-monitor.cookie": {
+          "type": "string",
+          "default": "",
+          "description": "%config.cookie.description%",
+          "order": 3
+        },
+        "deepseek-usage-monitor.proxy": {
+          "type": "string",
+          "default": "",
+          "description": "%config.proxy.description%",
+          "order": 4
+        },
+        "deepseek-usage-monitor.language": {
+          "type": "string",
+          "enum": [
+            "en",
+            "zh-cn"
+          ],
+          "enumDescriptions": [
+            "English",
+            "简体中文"
+          ],
+          "default": "zh-cn",
+          "description": "%config.language.description%",
+          "order": 5
+        },
+        "deepseek-usage-monitor.statusBar.items": {
+          "type": "array",
+          "default": [
+            "todayCost",
+            "balance"
+          ],
+          "items": {
+            "type": "string",
+            "enum": [
+              "todayCost",
+              "monthCost",
+              "balance",
+              "todayTokens"
+            ]
+          },
+          "uniqueItems": true,
+          "markdownDescription": "%config.statusBarItems.markdownDescription%",
+          "order": 6
+        },
+        "deepseek-usage-monitor.refreshInterval": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "markdownDescription": "%config.refreshInterval.markdownDescription%",
+          "order": 7
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "deepseek-usage-monitor.showUsage",
+        "title": "%command.openDashboard%"
+      },
+      {
+        "command": "deepseek-usage-monitor.refresh",
+        "title": "%command.refresh%"
+      },
+      {
+        "command": "deepseek-usage-monitor.setApiKey",
+        "title": "%command.setApiKey%"
+      }
+    ]
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.0.0"
+  }
+}

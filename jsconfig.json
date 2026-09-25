@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "target": "ES2022",
+    "checkJs": true,
+    "lib": ["ES2022"]
+  },
+  "exclude": ["node_modules", ".vscode-test"],
+  "typeAcquisition": {
+    "include": ["@types/vscode"]
+  }
+}

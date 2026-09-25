@@ -1,0 +1,9 @@
+.claude/
+Reference/
+preview/
+packs/
+images/
+jsconfig.json
+.gitignore
+node_modules/
+test/

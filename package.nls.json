@@ -1,0 +1,12 @@
+{
+  "extension.description": "Show DeepSeek API usage and balance in the VSCode status bar and dashboard.",
+  "command.openDashboard": "DeepSeek Usage Monitor: Open Dashboard",
+  "command.refresh": "DeepSeek Usage Monitor: Refresh",
+  "command.setApiKey": "DeepSeek Usage Monitor: Set API Key",
+  "config.sessionToken.description": "Platform session token (Bearer ...). Required to query usage data. How to get it: sign in to platform.deepseek.com/usage → press F12 (or right-click → Inspect) → Network → reload the page → find the cost?start=xxx request → copy the value after Bearer in the Authorization request header.",
+  "config.cookie.description": "Browser cookie string. Required for usage API authentication. Same steps as above; the Cookie request header usually sits right below Authorization.",
+  "config.proxy.description": "HTTP proxy URL (optional). Fill this in if you need a proxy to reach the platform; leave it empty for a direct connection.",
+  "config.language.description": "Language of the dashboard and extension messages. This setting does not affect the text on the VSCode settings page.",
+  "config.statusBarItems.markdownDescription": "Which items the status bar shows (**array order = display order**); leave empty to show the icon only.\n\n- `todayCost` — Today: ¥xx.xx\n- `monthCost` — Month: ¥xx.xx\n- `balance` — Balance: ¥xx.xx\n- `todayTokens` — Today xxx tokens\n\nMissing values are shown as `—` (today/month data needs Session Token & Cookie).",
+  "config.refreshInterval.markdownDescription": "Auto-refresh interval (**in minutes**). Default `1`. Decimals are allowed (e.g. `0.5` = 30 seconds); set `0` to disable auto-refresh."
+}

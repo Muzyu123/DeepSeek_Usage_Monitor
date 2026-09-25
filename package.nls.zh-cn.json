@@ -1,0 +1,12 @@
+{
+  "extension.description": "在 VSCode 状态栏和面板中显示 DeepSeek API 的用量和余额信息",
+  "command.openDashboard": "DeepSeek Usage Monitor: 打开面板",
+  "command.refresh": "DeepSeek Usage Monitor: 刷新",
+  "command.setApiKey": "DeepSeek Usage Monitor: 设置 API Key",
+  "config.sessionToken.description": "平台 Session Token（Bearer ...）。用于查询用量数据。获取方式：浏览器登录 platform.deepseek.com/usage → F12/右键菜单「检查」→ Network（网络）→ 刷新页面 → 找到 cost?start=xxx 请求 → 复制 Authorization 请求标头里 Bearer 之后的值",
+  "config.cookie.description": "浏览器 Cookie 字符串。用于用量 API 认证。获取方式同上，一般在 Authorization 请求头的下面就是 Cookie 请求头",
+  "config.proxy.description": "HTTP 代理地址（可选）。国内用户需要梯子时填写，留空则不使用代理",
+  "config.language.description": "面板与扩展提示的显示语言（不影响 VSCode 设置页的说明文字）",
+  "config.statusBarItems.markdownDescription": "状态栏显示哪些信息（**数组顺序即显示顺序**），留空则只显示图标。\n\n- `todayCost` — 本日消费:¥xx.xx\n- `monthCost` — 本月消费:¥xx.xx\n- `balance` — 账户余额:¥xx.xx\n- `todayTokens` — 本日消耗 xxx tokens\n\n数据缺失时显示 `—`（如未配置 Session Token / Cookie 时无法取本日与本月数据）。",
+  "config.refreshInterval.markdownDescription": "自动刷新间隔（**单位：分钟**）。默认 `1` 分钟。\n\n可填小数（如 `0.5` = 30 秒）；设为 `0` 可关闭自动刷新。"
+}
