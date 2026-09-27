@@ -2,9 +2,7 @@
 
 在 VSCode 里实时查看 DeepSeek API 的余额与用量：状态栏可自定义显示信息，详情面板复刻官网用量页风格，用量一目了然。
 
-[![Marketplace](https://img.shields.io/visual-studio-marketplace/v/Muzyu.deepseek-usage-monitor?label=marketplace&color=blue)](https://marketplace.visualstudio.com/items?itemName=Muzyu.deepseek-usage-monitor)
-[![Installs](https://img.shields.io/visual-studio-marketplace/i/Muzyu.deepseek-usage-monitor)](https://marketplace.visualstudio.com/items?itemName=Muzyu.deepseek-usage-monitor)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Open VSX](https://img.shields.io/open-vsx/v/Muzyu/deepseek-usage-monitor?label=open%20vsx&color=blue)](https://open-vsx.org/extension/Muzyu/deepseek-usage-monitor)  [![Open VSX Downloads](https://img.shields.io/open-vsx/dt/Muzyu/deepseek-usage-monitor?label=downloads)](https://open-vsx.org/extension/Muzyu/deepseek-usage-monitor)  [![Open VSX Rating](https://img.shields.io/open-vsx/rating/Muzyu/deepseek-usage-monitor?label=rating&color=green)](https://open-vsx.org/extension/Muzyu/deepseek-usage-monitor)  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **简体中文** ｜ [English](README.en.md)
 > 欢迎到我的开源仓库 https://github.com/Muzyu123/DeepSeek_Usage_Monitor 提出意见、反馈问题，如果有帮助到你请点亮 Star 哦<br>

@@ -2,14 +2,12 @@
 
 Keep an eye on your DeepSeek API balance and usage inside VSCode: a customizable status bar readout, plus a dashboard that mirrors the look of the official usage page.
 
-[![Marketplace](https://img.shields.io/visual-studio-marketplace/v/Muzyu.deepseek-usage-monitor?label=marketplace&color=blue)](https://marketplace.visualstudio.com/items?itemName=Muzyu.deepseek-usage-monitor)
-[![Installs](https://img.shields.io/visual-studio-marketplace/i/Muzyu.deepseek-usage-monitor)](https://marketplace.visualstudio.com/items?itemName=Muzyu.deepseek-usage-monitor)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Open VSX](<https://img.shields.io/open-vsx/v/Muzyu/deepseek-usage-monitor?label=open%20vsx&color=blue>)](https://open-vsx.org/extension/Muzyu/deepseek-usage-monitor)  [![Open VSX Downloads](https://img.shields.io/open-vsx/dt/Muzyu/deepseek-usage-monitor?label=downloads)](https://open-vsx.org/extension/Muzyu/deepseek-usage-monitor)  [![Open VSX Rating](https://img.shields.io/open-vsx/rating/Muzyu/deepseek-usage-monitor?label=rating&color=green)](https://open-vsx.org/extension/Muzyu/deepseek-usage-monitor)  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 [简体中文](README.md) ｜ **English**
 
-> Comments and bug reports are welcome in my repository: https://github.com/Muzyu123/DeepSeek_Usage_Monitor — if this extension helps you, a Star would be appreciated.<br>
-> This project is a refactor of the MIT-licensed project by linnin233: https://github.com/linnin233/deepseek-usage-vscode — the extension there is called “Deepseek Usage & Cost”, go give the original author some support!<br>
+> Comments and bug reports are welcome in my repository: https://github.com/Muzyu123/DeepSeek_Usage_Monitor — if this extension helps you, a Star would be appreciated.
+> This project is a refactor of the MIT-licensed project by linnin233: https://github.com/linnin233/deepseek-usage-vscode — the extension there is called “Deepseek Usage & Cost”, go give the original author some support!
 > This project is not affiliated with the original author or with DeepSeek.
 
 ## Features
@@ -25,15 +23,15 @@ Keep an eye on your DeepSeek API balance and usage inside VSCode: a customizable
 
 Search for `deepseek-usage-monitor` in Settings, or edit `settings.json`:
 
-| Setting                                     | Description                                                                                                                     | Required            |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
-| `API Key`                                   | Set it with the “Set API Key” button in the dashboard                                                                             | Yes                 |
-| `deepseek-usage-monitor.sessionToken`       | Session Token (`Bearer ...`), used to query usage                                                                                 | Yes                 |
-| `deepseek-usage-monitor.cookie`             | Browser Cookie, used together with the Session Token                                                                              | Yes                 |
-| `deepseek-usage-monitor.proxy`              | HTTP proxy URL                                                                                                                    | No                  |
-| `deepseek-usage-monitor.language`           | Display language: `en` / `zh-cn`                                                                                                  | No (default: zh-cn) |
-| `deepseek-usage-monitor.statusBar.items`    | Which items the status bar shows (array; order = display order): `todayCost` / `monthCost` / `balance` / `todayTokens`, default `[todayCost, balance]` | No |
-| `deepseek-usage-monitor.refreshInterval`    | Auto-refresh interval (in minutes), default `1`; decimals allowed (`0.5` = 30 seconds); set to `0` to turn auto refresh off        | No                  |
+| Setting                                    | Description                                                                                                                                                     | Required            |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
+| `API Key`                                | Set it with the “Set API Key” button in the dashboard                                                                                                         | Yes                 |
+| `deepseek-usage-monitor.sessionToken`    | Session Token (`Bearer ...`), used to query usage                                                                                                             | Yes                 |
+| `deepseek-usage-monitor.cookie`          | Browser Cookie, used together with the Session Token                                                                                                            | Yes                 |
+| `deepseek-usage-monitor.proxy`           | HTTP proxy URL                                                                                                                                                  | No                  |
+| `deepseek-usage-monitor.language`        | Display language:`en` / `zh-cn`                                                                                                                             | No (default: zh-cn) |
+| `deepseek-usage-monitor.statusBar.items` | Which items the status bar shows (array; order = display order):`todayCost` / `monthCost` / `balance` / `todayTokens`, default `[todayCost, balance]` | No                  |
+| `deepseek-usage-monitor.refreshInterval` | Auto-refresh interval (in minutes), default`1`; decimals allowed (`0.5` = 30 seconds); set to `0` to turn auto refresh off                                | No                  |
 
 ### How to get the Session Token and Cookie (verified September 2026)
 
@@ -48,9 +46,9 @@ Search for `deepseek-usage-monitor` in Settings, or edit `settings.json`:
 
 | Command                                    | Description                               |
 | ------------------------------------------ | ----------------------------------------- |
-| `DeepSeek Usage Monitor: Open Dashboard`   | Open the usage dashboard                  |
-| `DeepSeek Usage Monitor: Refresh`          | Refresh manually                          |
-| `DeepSeek Usage Monitor: Set API Key`      | Set the API Key (stored in SecretStorage) |
+| `DeepSeek Usage Monitor: Open Dashboard` | Open the usage dashboard                  |
+| `DeepSeek Usage Monitor: Refresh`        | Refresh manually                          |
+| `DeepSeek Usage Monitor: Set API Key`    | Set the API Key (stored in SecretStorage) |
 
 ## Data and privacy
 
