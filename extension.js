@@ -24,7 +24,7 @@ const SECRETS_TIMEOUT_MS = 2000; // 等待 secrets 响应超时的阈值，超�
 //  Constants & i18n
 // ============================================================
 
-// 平台按 UTC+8 口径返回日期（请求头 x-client-timezone-offset: 28800）
+// 平台用量口径为 UTC+8（区间接口显式传 tz=28800）
 const TZ8_OFFSET_MS = 8 * 3600 * 1000;
 
 const L10N = {
@@ -230,65 +230,143 @@ async function fetchPlatformApi(sessionToken, cookie, proxy, path) {
   return json;
 }
 
-async function fetchMonthData(sessionToken, cookie, proxy, month, year) {
-  const [amountData, costData] = await Promise.all([
-    fetchPlatformApi(sessionToken, cookie, proxy, `/api/v0/usage/amount?month=${month}&year=${year}`),
-    fetchPlatformApi(sessionToken, cookie, proxy, `/api/v0/usage/cost?month=${month}&year=${year}`),
-  ]);
-  return aggregateUsage(amountData, costData, year, month);
+// 区间接口：显式 tz=28800，平台按 GMT+8 分桶返回原始桶。
+// 月接口只有请求头 x-client-timezone-offset、平台并不据此分桶（实际按 UTC），
+// 会让 GMT+8 00:00–08:00 的消费落到前一天，因此用量一律走区间接口。
+function tz8DayStartSec(year, month, day) {
+  return Math.floor(Date.UTC(year, month - 1, day) / 1000) - TZ8_OFFSET_MS / 1000;
 }
 
-// ============================================================
-//  Data Aggregation — produces chart-ready structure
-// ============================================================
+async function fetchUsageRange(sessionToken, cookie, proxy, startSec, endSec) {
+  const q = `?start=${startSec}&end=${endSec}&tz=28800`;
+  const [amount, cost] = await Promise.all([
+    fetchPlatformApi(sessionToken, cookie, proxy, `/api/v0/usage/by_api_key/amount${q}`),
+    fetchPlatformApi(sessionToken, cookie, proxy, `/api/v0/usage/by_api_key/cost${q}`),
+  ]);
+  return { amount, cost };
+}
 
-function aggregateUsage(amountData, costData, year, month) {
-  const amountTotal = amountData?.data?.biz_data?.total || [];
-  const amountDays = amountData?.data?.biz_data?.days || [];
-  const costBiz = costData?.data?.biz_data;
-  const costTotal = Array.isArray(costBiz) ? costBiz[0]?.total || [] : costBiz?.total || [];
-  const costDays = Array.isArray(costBiz) ? costBiz[0]?.days || [] : costBiz?.days || [];
+// 桶时间 → 'MM-DD'（GMT+8）。数字按 Unix 秒（>1e12 视为毫秒）；字符串无时区后缀时按 GMT+8 解析
+function bucketDayKey(t) {
+  let ms = NaN;
+  if (typeof t === 'number') ms = t > 1e12 ? t : t * 1000;
+  else if (t != null) {
+    const s = String(t).trim();
+    ms = Date.parse(/[zZ]$|[+-]\d\d:?\d\d$/.test(s) ? s : s.replace(' ', 'T') + '+08:00');
+  }
+  if (!Number.isFinite(ms)) return null;
+  const d = new Date(ms + TZ8_OFFSET_MS);   // 转成 GMT+8 墙钟再取日期
+  return `${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+}
 
-  // Merge by model
-  const modelMap = {};
-  for (const item of amountTotal) {
-    const m = modelMap[item.model] = modelMap[item.model] || { model: item.model, cacheHit: 0, cacheMiss: 0, output: 0, cost: 0, requests: 0 };
-    for (const u of item.usage) {
-      if (u.type === 'REQUEST') m.requests = parseInt(u.amount) || 0;
-      else if (u.type === 'PROMPT_CACHE_HIT_TOKEN') m.cacheHit += parseInt(u.amount) || 0;
-      else if (u.type === 'PROMPT_CACHE_MISS_TOKEN') m.cacheMiss += parseInt(u.amount) || 0;
-      else if (u.type === 'RESPONSE_TOKEN') m.output += parseInt(u.amount) || 0;
+const numOf = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; };
+
+// 桶内用量归一化：区间接口是命名对象，同时兼容 [{type, amount}] 数组形式
+function normUsage(u) {
+  const out = { requests: 0, cacheHit: 0, cacheMiss: 0, output: 0 };
+  if (Array.isArray(u)) {
+    for (const it of u) {
+      if (!it) continue;
+      if (it.type === 'REQUEST') out.requests = numOf(it.amount);
+      else if (it.type === 'PROMPT_CACHE_HIT_TOKEN') out.cacheHit += numOf(it.amount);
+      else if (it.type === 'PROMPT_CACHE_MISS_TOKEN') out.cacheMiss += numOf(it.amount);
+      else if (it.type === 'RESPONSE_TOKEN') out.output += numOf(it.amount);
     }
+  } else if (u && typeof u === 'object') {
+    out.requests = numOf(u.REQUEST);
+    out.cacheHit = numOf(u.PROMPT_CACHE_HIT_TOKEN);
+    out.cacheMiss = numOf(u.PROMPT_CACHE_MISS_TOKEN);
+    out.output = numOf(u.RESPONSE_TOKEN);
   }
-  for (const item of costTotal) {
-    const m = modelMap[item.model]; if (!m) continue;
-    let sum = 0; for (const u of item.usage) sum += parseFloat(u.amount) || 0; m.cost = sum;
-  }
-  const models = Object.values(modelMap).filter(m => m.cacheHit + m.cacheMiss + m.output + m.requests > 0);
+  return out;
+}
 
-  // Merge daily: by model per day。日期 key 统一归一为 'MM-DD'，后续全部复用
-  const dayModelMap = {};
-  for (const day of amountDays) {
-    const dk = String(day.date).slice(5);
+// 桶内金额：实测字段是 bucket.cost；同时兼容 usage.amount、usage[].amount|cost 与 usage 本身为数值
+
+function bucketCost(usage, bucket) {
+  const pick = (v) => {
+    if (v == null) return null;
+    if (typeof v === 'number' || typeof v === 'string') return numOf(v);
+    if (Array.isArray(v)) {
+      const known = v.filter((it) => it && (it.amount != null || it.cost != null));
+      if (!known.length) return null;
+      return known.reduce((s, it) => s + numOf(it.amount != null ? it.amount : it.cost), 0);
+    }
+    if (typeof v === 'object') {
+      if (v.amount != null) return numOf(v.amount);
+      if (v.cost != null) return numOf(v.cost);
+    }
+    return null;
+  };
+  const u = pick(usage);
+  if (u != null) return u;
+  return pick(bucket && (bucket.amount != null ? bucket.amount : bucket.cost));
+}
+
+function seriesOf(apiJson) {
+  const biz = apiJson && apiJson.data && apiJson.data.biz_data;
+  if (!biz) return [];
+  const out = [];
+  for (const g of (Array.isArray(biz) ? biz : [biz])) {
+    if (!g) continue;
+    if (Array.isArray(g.series)) out.push(...g.series);
+    const inner = Array.isArray(g.data) ? g.data : (g.data ? [g.data] : []);
+    for (const sub of inner) if (sub && Array.isArray(sub.series)) out.push(...sub.series);
+  }
+  return out;
+}
+
+// 返回 null 的唯一条件是成本字段结构无法识别，防止金额为 0 被误识别为解析错误
+function aggregateUsageRange(amountJson, costJson, year, month) {
+  const dayModelMap = {}, modelMap = {};
+  let costSeen = 0;
+  const cell = (dk, model) => {
     const dm = dayModelMap[dk] = dayModelMap[dk] || {};
-    for (const item of day.data || []) {
-      dm[item.model] = dm[item.model] || { cacheHit: 0, cacheMiss: 0, output: 0, requests: 0, cost: 0 };
-      for (const u of item.usage) {
-        if (u.type === 'REQUEST') dm[item.model].requests = parseInt(u.amount) || 0;
-        else if (u.type === 'PROMPT_CACHE_HIT_TOKEN') dm[item.model].cacheHit += parseInt(u.amount) || 0;
-        else if (u.type === 'PROMPT_CACHE_MISS_TOKEN') dm[item.model].cacheMiss += parseInt(u.amount) || 0;
-        else if (u.type === 'RESPONSE_TOKEN') dm[item.model].output += parseInt(u.amount) || 0;
-      }
+    return dm[model] = dm[model] || { cacheHit: 0, cacheMiss: 0, output: 0, requests: 0, cost: 0 };
+  };
+  for (const s of seriesOf(amountJson)) {
+    const model = s.model || 'unknown';
+    for (const b of s.buckets || []) {
+      const dk = bucketDayKey(b.time); if (!dk) continue;
+      const u = normUsage(b.usage), e = cell(dk, model);
+      e.requests += u.requests; e.cacheHit += u.cacheHit; e.cacheMiss += u.cacheMiss; e.output += u.output;
     }
   }
-  for (const day of costDays) {
-    const dm = dayModelMap[String(day.date).slice(5)]; if (!dm) continue;
-    for (const item of day.data || []) {
-      if (!dm[item.model]) dm[item.model] = { cacheHit: 0, cacheMiss: 0, output: 0, requests: 0, cost: 0 };
-      let sum = 0; for (const u of item.usage) sum += parseFloat(u.amount) || 0; dm[item.model].cost = sum;
+  for (const s of seriesOf(costJson)) {
+    const model = s.model || 'unknown';
+    for (const b of s.buckets || []) {
+      const dk = bucketDayKey(b.time); if (!dk) continue;
+      const c = bucketCost(b.usage, b);
+      if (c == null) continue;                 // 金额字段不认识：跳过，不当成 0 记账
+      costSeen++;
+      cell(dk, model).cost += c;
     }
   }
+  if (!costSeen) return null;                   // 结构无法识别：是否回退由调用方决定
+  for (const dk of Object.keys(dayModelMap)) {
+    for (const model of Object.keys(dayModelMap[dk])) {
+      const e = dayModelMap[dk][model];
+      const m = modelMap[model] = modelMap[model] || { model, cacheHit: 0, cacheMiss: 0, output: 0, cost: 0, requests: 0 };
+      m.cacheHit += e.cacheHit; m.cacheMiss += e.cacheMiss; m.output += e.output; m.requests += e.requests; m.cost += e.cost;
+    }
+  }
+  return finalizeUsage(modelMap, dayModelMap, year, month);
+}
 
+async function fetchMonthData(sessionToken, cookie, proxy, month, year) {
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const start = tz8DayStartSec(year, month, 1);
+  const end = tz8DayStartSec(year, month, daysInMonth) + 86400;   // 右开：次月 1 日 00:00（GMT+8）
+  const { amount, cost } = await fetchUsageRange(sessionToken, cookie, proxy, start, end);
+  const agg = aggregateUsageRange(amount, cost, year, month);
+  // 结构无法识别时如实报错；不得回退到旧月接口口径（按 UTC 分桶，存在固定偏移）
+  if (!agg) throw new Error('Invalid response (unrecognized usage payload)');
+  return agg;
+}
+
+// 收尾：模型汇总 + 稠密每日序列 + 今日取值。
+function finalizeUsage(modelMap, dayModelMap, year, month) {
+  const models = Object.values(modelMap).filter(m => m.cacheHit + m.cacheMiss + m.output + m.requests > 0);
   const totalTokens = models.reduce((s, m) => s + m.cacheHit + m.cacheMiss + m.output, 0);
   const totalCost = models.reduce((s, m) => s + m.cost, 0);
   const totalReqs = models.reduce((s, m) => s + m.requests, 0);
@@ -960,7 +1038,7 @@ async function activate(context) {
     if (error) { statusBarItem.text = '$(error) DeepSeek Usage'; statusBarItem.tooltip = errorText ? `${errorText}\n(${error})` : error; statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground'); return; }
     const bal = balance?.balance_infos?.[0]; const balTotal = bal ? parseFloat(bal.total_balance).toFixed(2) : null;
     const cost = usage ? usage.totalCost.toFixed(2) : null;
-    // 选了往月时 aggregateUsage 给 todayCost/todayTokens=null（"今日"对往月无意义），与面板一致显示 —
+    // 往月的 todayCost/todayTokens 为 null（"今日"对往月无意义），与面板一致显示 —
     const today = usage && usage.todayCost != null ? usage.todayCost.toFixed(2) : null;
     const todayTokens = usage && usage.todayTokens != null ? usage.todayTokens : null;
 

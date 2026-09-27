@@ -8,7 +8,7 @@
 
 **简体中文** ｜ [English](README.en.md)
 
-> 本项目重构修改自 linnin233 的 MIT 项目：https://github.com/linnin233/deepseek-usage-vscode，插件名称为“Deepseek Usage & Cost”，可以支持一下原作者！
+> 本项目重构修改自 linnin233 的 MIT 项目：https://github.com/linnin233/deepseek-usage-vscode， 插件名称为“Deepseek Usage & Cost”，可以支持一下原作者！<br>
 > 本项目与原作者及 DeepSeek 官方均无隶属关系
 
 ## 功能
