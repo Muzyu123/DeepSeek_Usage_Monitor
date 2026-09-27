@@ -7,16 +7,17 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **简体中文** ｜ [English](README.en.md)
-
-> 本项目重构修改自 linnin233 的 MIT 项目：https://github.com/linnin233/deepseek-usage-vscode， 插件名称为“Deepseek Usage & Cost”，可以支持一下原作者！<br>
+> 欢迎到我的开源仓库 https://github.com/Muzyu123/DeepSeek_Usage_Monitor 提出意见、反馈问题，如果有帮助到你请点亮 Star 哦
+> 本项目重构修改自 linnin233 的 MIT 项目：https://github.com/linnin233/deepseek-usage-vscode， 插件名称为“Deepseek Usage & Cost”，可以支持一下原作者！
 > 本项目与原作者及 DeepSeek 官方均无隶属关系
 
 ## 功能
 
 - **可自定义状态栏信息显示**：底栏右侧常驻显示本日消费 / 本月消费 / 账户余额 / 本日消耗token，显示项目可随意配置
-- **仿 Official 风格面板**：充值余额卡片、累计消费、月消费金额 / API 请求次数 / Tokens 统计、每日消费柱状图
-- **支持中英文切换**：默认简体中文
+- **仿 Official 风格面板**：充值余额卡片、今日消费、自定义区间消费金额 / API 请求次数 / Tokens 统计 & 按模型统计消费柱状图
+- **支持中英文切换**：设置面板语言自动跟随VSCode全局设置，详情面板&报错通知语言可自定义配置，默认简体中文
 - **自动刷新**：可自由设置刷新频率，默认1分钟刷新一次
+- **API Token 加密存储：** API Key 保存在 VSCode SecretStorage中，保护你的隐私安全
 - **支持 HTTP 代理**：继承自原项目
 
 ## 配置
@@ -25,7 +26,7 @@
 
 | 配置项                                     | 说明                                                                                                                               | 必填         |
 | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- | ------------ |
-| `API Key`                                    | 点击详情面板中的“设置 API Key”按钮进行设置                                                                                       | 是           |
+| `API Key`                                | 点击详情面板中的“设置 API Key”按钮进行设置                                                                                       | 是           |
 | `deepseek-usage-monitor.sessionToken`    | Session Token (`Bearer ...`)，用于查询用量                                                                                       | 是           |
 | `deepseek-usage-monitor.cookie`          | 浏览器 Cookie，与 Session Token 配合使用                                                                                           | 是           |
 | `deepseek-usage-monitor.proxy`           | HTTP 代理地址                                                                                                                      | 否           |

@@ -18,13 +18,14 @@ const tls = require('tls');
 // 系统 keyring 缺失时（如 Linux 无 org.freedesktop.secrets）会造成进程阻塞
 // 所以 secrets 读取一律带超时 + 内存缓存
 const SECRETS_KEY = 'deepseek-usage-monitor.apiKey';
+const PRESET_STATE_KEY = 'deepseekUsage.rangePreset';   // 面板时间窗口的持久化键
 const SECRETS_TIMEOUT_MS = 2000; // 等待 secrets 响应超时的阈值，超时后降级为内存缓存并报错，API Key 只在本次会话有效
 
 // ============================================================
 //  Constants & i18n
 // ============================================================
 
-// 平台用量口径为 UTC+8（区间接口显式传 tz=28800）
+// 平台按 UTC+8 口径返回日期（请求头 x-client-timezone-offset: 28800）
 const TZ8_OFFSET_MS = 8 * 3600 * 1000;
 
 const L10N = {
@@ -34,19 +35,24 @@ const L10N = {
     tzNote: 'All dates are in GMT+8. Data may be delayed up to 5 minutes.',
     toppedUpBalance: 'Top-up Balance',
     todayCost: "Today's Cost",
-    todayCurrentMonthOnly: 'Current month only',
     costAmount: 'Cost',
     costCny: 'Cost (CNY)',
     apiRequests: 'API requests',
     tokens: 'Tokens',
-    monthLabel: 'Month',
+    rangeLabel: 'Time range',
+    rangeToday: 'Today',
+    rangeYesterday: 'Yesterday',
+    rangeLast7: 'Last 7 days',
+    rangeLast30: 'Last 30 days',
+    rangeThisMonth: 'This month',
+    rangeLastMonth: 'Last month',
+    noDataRange: 'No cost data in this period',
     updatedAtLabel: 'Updated {0}',
     loading: 'Loading...', refresh: 'Refresh',
     settings: '⚙ Settings', setApiKey: 'Set API Key',
     sbTodayCost: 'Today', sbMonthCost: 'Month', sbBalance: 'Balance', sbTodayTokens: 'Today',
     noSessionToken: 'Configure Session Token & Cookie',
     errNoApiKey: 'Set API Key',
-    noDataThisMonth: 'No cost data this month',
     loadFailed: 'Failed to load usage data',
     sessionExpired: 'Session expired — update your Session Token',
     balanceInsufficient: 'Insufficient balance',
@@ -73,8 +79,6 @@ const L10N = {
     errScopeBalance: 'Balance',
     errScopeUsage: 'Usage',
     errEntry: '{0}: {1}',
-    checkSessionToken: 'check session token / network',
-    loadMonthFailed: 'DeepSeek Usage: failed to load {0} — {1}',
     genericError: 'DeepSeek Usage error: {0}',
     clickDetails: 'Click for details',
     granted: 'Granted',
@@ -85,19 +89,24 @@ const L10N = {
     tzNote: '所有日期均按 GMT+8 时间显示，数据可能有 5 分钟延迟。',
     toppedUpBalance: '充值余额',
     todayCost: '今日消费',
-    todayCurrentMonthOnly: '仅当月可用',
     costAmount: '消费金额',
     costCny: '消费金额（CNY）',
     apiRequests: 'API 请求次数',
     tokens: 'Tokens',
-    monthLabel: '月份',
+    rangeLabel: '时间范围',
+    rangeToday: '今天',
+    rangeYesterday: '昨天',
+    rangeLast7: '近7天',
+    rangeLast30: '近30天',
+    rangeThisMonth: '本月',
+    rangeLastMonth: '上月',
+    noDataRange: '该时间段暂无消费数据',
     updatedAtLabel: '数据更新时间 {0}',
     loading: '加载中...', refresh: '刷新',
     settings: '⚙ 设置', setApiKey: '设置 API Key',
     sbTodayCost: '本日消费', sbMonthCost: '本月消费', sbBalance: '账户余额', sbTodayTokens: '本日消耗',
     noSessionToken: '请在设置中配置 Session Token 和 Cookie',
     errNoApiKey: '请设置 API Key',
-    noDataThisMonth: '本月暂无消费数据',
     loadFailed: '加载用量数据失败',
     sessionExpired: '会话已过期，请更新 Session Token',
     balanceInsufficient: '余额不足，请充值',
@@ -124,8 +133,6 @@ const L10N = {
     errScopeBalance: '余额',
     errScopeUsage: '用量',
     errEntry: '{0}：{1}',
-    checkSessionToken: '请检查 Session Token 与网络',
-    loadMonthFailed: 'DeepSeek Usage：加载 {0} 失败 — {1}',
     genericError: 'DeepSeek Usage 出错：{0}',
     clickDetails: '点击查看详情',
     granted: '赠送',
@@ -230,11 +237,95 @@ async function fetchPlatformApi(sessionToken, cookie, proxy, path) {
   return json;
 }
 
-// 区间接口：显式 tz=28800，平台按 GMT+8 分桶返回原始桶。
-// 月接口只有请求头 x-client-timezone-offset、平台并不据此分桶（实际按 UTC），
-// 会让 GMT+8 00:00–08:00 的消费落到前一天，因此用量一律走区间接口。
+// 区间接口：显式 tz=28800，平台按 GMT+8 分桶返回原始小时桶。
+// 月接口只有请求头 x-client-timezone-offset，平台并不据此分桶（实际按 UTC），
+// 会让 GMT+8 00:00–08:00 的消费落到前一天 —— 所以优先走区间接口，月接口仅作兜底。
 function tz8DayStartSec(year, month, day) {
   return Math.floor(Date.UTC(year, month - 1, day) / 1000) - TZ8_OFFSET_MS / 1000;
+}
+
+// ============================================================
+//  Time Range Presets —— 面板时间窗口
+// ============================================================
+
+// 下拉顺序 = 数组顺序；id 会写进 globalState，改动等于让用户已选的存档失效
+const RANGE_PRESET_DEFS = [
+  { id: 'today', key: 'rangeToday', granularity: 'hour' },
+  { id: 'yesterday', key: 'rangeYesterday', granularity: 'hour' },
+  { id: 'last7', key: 'rangeLast7', granularity: 'day' },
+  { id: 'last30', key: 'rangeLast30', granularity: 'day' },
+  { id: 'thisMonth', key: 'rangeThisMonth', granularity: 'day' },
+  { id: 'lastMonth', key: 'rangeLastMonth', granularity: 'day' },
+];
+const DEFAULT_PRESET = 'thisMonth';
+const SLOT_SEC = { hour: 3600, day: 86400 };
+
+// 窗口的可读区间：日粒度 '2026-09-01 ~ 2026-09-30'；小时粒度 '2026-09-27 00:00 ~ 24:00'
+function fmtRangeLabel(spec) {
+  const ymd = (sec) => {
+    const d = new Date(sec * 1000 + TZ8_OFFSET_MS);
+    return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+  };
+  if (spec.granularity === 'hour') {
+    const a = new Date(spec.startSec * 1000 + TZ8_OFFSET_MS);
+    const b = new Date(spec.endSec * 1000 + TZ8_OFFSET_MS);
+    return `${ymd(spec.startSec)} ${pad2(a.getUTCHours())}:00 ~ ${pad2(b.getUTCHours())}:00`;
+  }
+  return `${ymd(spec.startSec)} ~ ${ymd(spec.endSec - 86400)}`;
+}
+
+function isPreset(id) { return RANGE_PRESET_DEFS.some((d) => d.id === id); }
+function presetDef(id) {
+  return RANGE_PRESET_DEFS.find((d) => d.id === id) || RANGE_PRESET_DEFS.find((d) => d.id === DEFAULT_PRESET);
+}
+
+// 窗口区间为左闭右开 [startSec, endSec)。今天/近7天/近30天/本月的 end 落在未来
+// （官方用量页同样如此且平台接受）；渲染多少槽由 visibleSlotCount 决定，不裁剪请求。
+// nowMs 可注入，便于对跨月、月初、月末等时刻做确定性测试。
+function resolveRange(id, nowMs) {
+  const now = nowMs == null ? Date.now() : nowMs;
+  const t = new Date(now + TZ8_OFFSET_MS);
+  const y = t.getUTCFullYear(), mo = t.getUTCMonth() + 1, d = t.getUTCDate();
+  const todayStart = tz8DayStartSec(y, mo, d);
+  const monthStart = tz8DayStartSec(y, mo, 1);
+  const def = presetDef(id);
+  const mk = (startSec, endSec, granularity) => {
+    const slotSec = SLOT_SEC[granularity];
+    return { id: def.id, startSec, endSec, granularity, slotSec, slots: Math.round((endSec - startSec) / slotSec) };
+  };
+  if (def.id === 'today') return mk(todayStart, todayStart + 86400, 'hour');
+  if (def.id === 'yesterday') return mk(todayStart - 86400, todayStart, 'hour');
+  if (def.id === 'last7') return mk(todayStart - 6 * 86400, todayStart + 86400, 'day');
+  if (def.id === 'last30') return mk(todayStart - 29 * 86400, todayStart + 86400, 'day');
+  if (def.id === 'lastMonth') {
+    const prev = new Date(Date.UTC(y, mo - 2, 1));   // mo-2：JS 月份从 0 起算，减 2 即上一月
+    return mk(tz8DayStartSec(prev.getUTCFullYear(), prev.getUTCMonth() + 1, 1), monthStart, 'day');
+  }
+  const daysInMonth = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+  return mk(monthStart, tz8DayStartSec(y, mo, daysInMonth) + 86400, 'day');
+}
+
+// 绝对秒 → 所属槽的绝对秒。小时槽与 UTC 整点对齐（+08:00 恰为整小时）；
+// 日槽必须按 GMT+8 日界：floor(ts/86400) 会按 UTC 分桶，即已修复过的 8 小时偏差。
+function slotStartSec(tsSec, granularity) {
+  if (granularity === 'hour') return Math.floor(tsSec / 3600) * 3600;
+  return Math.floor((tsSec + TZ8_OFFSET_MS / 1000) / 86400) * 86400 - TZ8_OFFSET_MS / 1000;
+}
+
+// 可见槽数 = 已过去的槽 + 当前槽（"只画到今天/当前小时"，六种预设通用）
+function visibleSlotCount(spec, nowMs) {
+  const nowSec = Math.floor((nowMs == null ? Date.now() : nowMs) / 1000);
+  const elapsed = Math.floor((nowSec - spec.startSec) / spec.slotSec) + 1;
+  return Math.max(0, Math.min(spec.slots, elapsed));
+}
+
+// 窗口是否已覆盖"本月 1 日 → 现在"：为真时本月快照可复用窗口数据，省一次请求
+function coversMonthToDate(spec, nowMs) {
+  if (spec.granularity !== 'day') return false;
+  const now = nowMs == null ? Date.now() : nowMs;
+  const t = new Date(now + TZ8_OFFSET_MS);
+  const monthStart = tz8DayStartSec(t.getUTCFullYear(), t.getUTCMonth() + 1, 1);
+  return spec.startSec <= monthStart && spec.endSec > Math.floor(now / 1000);
 }
 
 async function fetchUsageRange(sessionToken, cookie, proxy, startSec, endSec) {
@@ -246,22 +337,20 @@ async function fetchUsageRange(sessionToken, cookie, proxy, startSec, endSec) {
   return { amount, cost };
 }
 
-// 桶时间 → 'MM-DD'（GMT+8）。数字按 Unix 秒（>1e12 视为毫秒）；字符串无时区后缀时按 GMT+8 解析
-function bucketDayKey(t) {
-  let ms = NaN;
-  if (typeof t === 'number') ms = t > 1e12 ? t : t * 1000;
-  else if (t != null) {
-    const s = String(t).trim();
-    ms = Date.parse(/[zZ]$|[+-]\d\d:?\d\d$/.test(s) ? s : s.replace(' ', 'T') + '+08:00');
-  }
-  if (!Number.isFinite(ms)) return null;
-  const d = new Date(ms + TZ8_OFFSET_MS);   // 转成 GMT+8 墙钟再取日期
-  return `${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+// 桶时间 → 绝对 Unix 秒。数字按秒（>1e12 视为毫秒）；字符串无时区后缀时按 GMT+8 解析
+function bucketSecOf(t) {
+  if (typeof t === 'number') return Math.floor((t > 1e12 ? t : t * 1000) / 1000);
+  if (t == null) return null;
+  const str = String(t).trim();
+  const ms = Date.parse(/[zZ]$|[+-]\d\d:?\d\d$/.test(str) ? str : str.replace(' ', 'T') + '+08:00');
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
 }
+
+
 
 const numOf = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; };
 
-// 桶内用量归一化：区间接口是命名对象，同时兼容 [{type, amount}] 数组形式
+// 桶内用量归一化
 function normUsage(u) {
   const out = { requests: 0, cacheHit: 0, cacheMiss: 0, output: 0 };
   if (Array.isArray(u)) {
@@ -281,7 +370,8 @@ function normUsage(u) {
   return out;
 }
 
-// 桶内金额：实测字段是 bucket.cost；同时兼容 usage.amount、usage[].amount|cost 与 usage 本身为数值
+// 桶内金额归一化：金额字段在不同接口/版本里可能是 usage.amount、usage[{amount}]、usage 本身或 bucket.amount
+// 桶内金额：可识别时返回数值（可能为 0），无法识别时返回 null
 
 function bucketCost(usage, bucket) {
   const pick = (v) => {
@@ -303,6 +393,8 @@ function bucketCost(usage, bucket) {
   return pick(bucket && (bucket.amount != null ? bucket.amount : bucket.cost));
 }
 
+// 取 series 列表：amount 直接在 biz_data.series；cost 多套一层 —— biz_data.data = [{currency, series}]。
+// 两种形状都收进来，避免接口再调整时又整条链路失效。
 function seriesOf(apiJson) {
   const biz = apiJson && apiJson.data && apiJson.data.biz_data;
   if (!biz) return [];
@@ -316,85 +408,99 @@ function seriesOf(apiJson) {
   return out;
 }
 
-// 返回 null 的唯一条件是成本字段结构无法识别，防止金额为 0 被误识别为解析错误
-function aggregateUsageRange(amountJson, costJson, year, month) {
-  const dayModelMap = {}, modelMap = {};
-  let costSeen = 0;
-  const cell = (dk, model) => {
-    const dm = dayModelMap[dk] = dayModelMap[dk] || {};
-    return dm[model] = dm[model] || { cacheHit: 0, cacheMiss: 0, output: 0, requests: 0, cost: 0 };
+// 槽 → 展示元数据（date/label/tipHead 是唯一出现日期字符串的地方）
+function barMeta(spec, idx) {
+  const slotSec = spec.startSec + idx * spec.slotSec;
+  const d = new Date(slotSec * 1000 + TZ8_OFFSET_MS);
+  const date = `${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+  const ymd = `${d.getUTCFullYear()}-${date}`;
+  if (spec.granularity === 'hour') {
+    const hh = d.getUTCHours();
+    const from = `${pad2(hh)}:00`;
+    const to = hh === 23 ? '24:00' : `${pad2(hh + 1)}:00`;   // 末槽写 24:00，避免被读成次日 00:00
+    return { kind: 'hour', key: `${ymd}T${pad2(hh)}`, date, hour: hh, from, to,
+      label: [from], tipHead: `${date} ${from}–${to}` };   // 轴刻度只写起点（与官方一致），区间留给浮层
+  }
+  return { kind: 'day', key: ymd, date, day: d.getUTCDate(),
+    label: [`${d.getUTCMonth() + 1}/${d.getUTCDate()}`], tipHead: ymd };
+}
+
+// 区间响应 → 窗口聚合。索引使用"绝对秒槽下标"，不使用日期字符串，
+// 因此跨月/跨年的同日号不会相撞（近7天/近30天跨月时必须如此）。
+// 返回 null 的唯一条件是金额字段结构无法识别（costSeen === 0）；金额为 0 属合法数据。
+function aggregateUsageRange(amountJson, costJson, spec, nowMs) {
+  const visible = visibleSlotCount(spec, nowMs);
+  const slotMap = new Map();     // 槽下标 → Map(model → cell)
+  const modelMap = new Map();
+  let costBuckets = 0;           // 响应里可解析时间的成本桶总数（判断"结构是否认得"，与窗口无关）
+  let costSeen = 0;              // 其中金额字段认得出的数量
+  const cellAt = (idx, model) => {
+    let byModel = slotMap.get(idx);
+    if (!byModel) { byModel = new Map(); slotMap.set(idx, byModel); }
+    let c = byModel.get(model);
+    if (!c) { c = { cacheHit: 0, cacheMiss: 0, output: 0, requests: 0, cost: 0 }; byModel.set(model, c); }
+    return c;
   };
-  for (const s of seriesOf(amountJson)) {
-    const model = s.model || 'unknown';
-    for (const b of s.buckets || []) {
-      const dk = bucketDayKey(b.time); if (!dk) continue;
-      const u = normUsage(b.usage), e = cell(dk, model);
-      e.requests += u.requests; e.cacheHit += u.cacheHit; e.cacheMiss += u.cacheMiss; e.output += u.output;
+  const absorb = (json, isCost) => {
+    for (const series of seriesOf(json)) {
+      const model = series.model || 'unknown';
+      for (const b of series.buckets || []) {
+        const ts = bucketSecOf(b.time);
+        if (ts == null) continue;
+        if (isCost) {
+          costBuckets++;
+          const c = bucketCost(b.usage, b);
+          if (c == null) continue;                                             // 金额字段不认识：跳过，不按 0 记账
+          costSeen++;
+          if (ts < spec.startSec || ts >= spec.endSec) continue;               // 认得出金额但不在窗口内：只用于结构判定
+          const ci = Math.round((slotStartSec(ts, spec.granularity) - spec.startSec) / spec.slotSec);
+          if (ci < 0 || ci >= visible) continue;
+          cellAt(ci, model).cost += c;
+        } else {
+          if (ts < spec.startSec || ts >= spec.endSec) continue;               // 左闭右开；平台溢出桶丢弃
+          const idx = Math.round((slotStartSec(ts, spec.granularity) - spec.startSec) / spec.slotSec);
+          if (idx < 0 || idx >= visible) continue;                             // 未来时段天然落在数组之外
+          const u = normUsage(b.usage), cell = cellAt(idx, model);
+          cell.requests += u.requests; cell.cacheHit += u.cacheHit;
+          cell.cacheMiss += u.cacheMiss; cell.output += u.output;
+        }
+      }
+    }
+  };
+  absorb(amountJson, false);
+  absorb(costJson, true);
+  // 只有"响应里确实有桶、却一个金额都认不出"才报错结构无法识别；
+  // 响应为空（该窗口没有数据）是合法结果，必须如实返回全 0。
+  if (costBuckets > 0 && costSeen === 0) return null;
+  for (const byModel of slotMap.values()) {
+    for (const [model, c] of byModel) {
+      let m = modelMap.get(model);
+      if (!m) { m = { model, cacheHit: 0, cacheMiss: 0, output: 0, cost: 0, requests: 0 }; modelMap.set(model, m); }
+      m.cacheHit += c.cacheHit; m.cacheMiss += c.cacheMiss; m.output += c.output;
+      m.requests += c.requests; m.cost += c.cost;
     }
   }
-  for (const s of seriesOf(costJson)) {
-    const model = s.model || 'unknown';
-    for (const b of s.buckets || []) {
-      const dk = bucketDayKey(b.time); if (!dk) continue;
-      const c = bucketCost(b.usage, b);
-      if (c == null) continue;                 // 金额字段不认识：跳过，不当成 0 记账
-      costSeen++;
-      cell(dk, model).cost += c;
-    }
-  }
-  if (!costSeen) return null;                   // 结构无法识别：是否回退由调用方决定
-  for (const dk of Object.keys(dayModelMap)) {
-    for (const model of Object.keys(dayModelMap[dk])) {
-      const e = dayModelMap[dk][model];
-      const m = modelMap[model] = modelMap[model] || { model, cacheHit: 0, cacheMiss: 0, output: 0, cost: 0, requests: 0 };
-      m.cacheHit += e.cacheHit; m.cacheMiss += e.cacheMiss; m.output += e.output; m.requests += e.requests; m.cost += e.cost;
-    }
-  }
-  return finalizeUsage(modelMap, dayModelMap, year, month);
-}
-
-async function fetchMonthData(sessionToken, cookie, proxy, month, year) {
-  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
-  const start = tz8DayStartSec(year, month, 1);
-  const end = tz8DayStartSec(year, month, daysInMonth) + 86400;   // 右开：次月 1 日 00:00（GMT+8）
-  const { amount, cost } = await fetchUsageRange(sessionToken, cookie, proxy, start, end);
-  const agg = aggregateUsageRange(amount, cost, year, month);
-  // 结构无法识别时如实报错；不得回退到旧月接口口径（按 UTC 分桶，存在固定偏移）
-  if (!agg) throw new Error('Invalid response (unrecognized usage payload)');
-  return agg;
-}
-
-// 收尾：模型汇总 + 稠密每日序列 + 今日取值。
-function finalizeUsage(modelMap, dayModelMap, year, month) {
-  const models = Object.values(modelMap).filter(m => m.cacheHit + m.cacheMiss + m.output + m.requests > 0);
-  const totalTokens = models.reduce((s, m) => s + m.cacheHit + m.cacheMiss + m.output, 0);
-  const totalCost = models.reduce((s, m) => s + m.cost, 0);
-  const totalReqs = models.reduce((s, m) => s + m.requests, 0);
-
-  // 稠密每日消费序列：整月逐日填满（缺日 = 0），当月只填到今天。
-  // 柱子按数组下标等距排布，缺日会导致柱位错移，所以必须稠密。
-  const now = tz8Now();
-  const isCurrentMonth = now.getUTCFullYear() === year && now.getUTCMonth() + 1 === month;
-  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
-  const lastDay = isCurrentMonth ? now.getUTCDate() : daysInMonth;
-  const modelOrder = models.map(m => m.model);
-  const days = [];
-  for (let d = 1; d <= lastDay; d++) {
-    const key = `${pad2(month)}-${pad2(d)}`;
-    const dm = dayModelMap[key] || {};
+  const models = [...modelMap.values()].filter((m) => m.cacheHit + m.cacheMiss + m.output + m.requests > 0);
+  const modelOrder = models.map((m) => m.model);
+  const bars = [];
+  for (let i = 0; i < visible; i++) {
+    const byModel = slotMap.get(i) || new Map();
     // parts 按 models 顺序排列：颜色与浮层行序都依赖它，不能按金额排序
-    const parts = modelOrder
-      .filter(m => dm[m] && dm[m].cost > 0)
-      .map(m => ({ model: m, cost: dm[m].cost }));
-    const dayTokens = Object.values(dm).reduce((s, m) => s + m.cacheHit + m.cacheMiss + m.output, 0);
-    days.push({ date: key, day: d, cost: parts.reduce((s, p) => s + p.cost, 0), tokens: dayTokens, parts });
+    const parts = modelOrder.filter((m) => byModel.has(m) && byModel.get(m).cost > 0)
+      .map((m) => ({ model: m, cost: byModel.get(m).cost }));
+    let tokens = 0;
+    for (const c of byModel.values()) tokens += c.cacheHit + c.cacheMiss + c.output;
+    bars.push(Object.assign(barMeta(spec, i), { cost: parts.reduce((sum, p) => sum + p.cost, 0), tokens, parts }));
   }
-  const todayDate = `${pad2(now.getUTCMonth() + 1)}-${pad2(now.getUTCDate())}`;
-  const todayCost = isCurrentMonth ? (days[now.getUTCDate() - 1]?.cost ?? 0) : null;
-  const todayTokens = isCurrentMonth ? (days[now.getUTCDate() - 1]?.tokens ?? 0) : null;
-
-  return { models, days, totalTokens, totalCost, totalReqs, isCurrentMonth, todayDate, todayCost, todayTokens };
+  return {
+    spec, granularity: spec.granularity, slots: spec.slots, visible, models, bars,
+    totalCost: models.reduce((sum, m) => sum + m.cost, 0),
+    totalTokens: models.reduce((sum, m) => sum + m.cacheHit + m.cacheMiss + m.output, 0),
+    totalReqs: models.reduce((sum, m) => sum + m.requests, 0),
+  };
 }
+
+
 
 // ============================================================
 //  Webview HTML Generator — Canvas Charts Dashboard
@@ -402,19 +508,11 @@ function finalizeUsage(modelMap, dayModelMap, year, month) {
 //
 // 数据不再拼进 HTML，只有面板创建和语言变化时才重建外壳，其余一律通过 postMessage 推送数据
 
-// 月份下拉：以 UTC+8 的"当前月"为基准回溯 12 个月
-function monthOptions() {
-  const now = tz8Now();
-  const out = [];
-  for (let i = 0; i < 12; i++) {
-    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
-    out.push(`${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}`);
-  }
-  return out;
-}
 
-function buildPanelHtml(i18n, langCode) {
-  const monthOpts = monthOptions().map(v => `<option value="${v}">${v}</option>`).join('');
+function buildPanelHtml(i18n, langCode, selectedPreset) {
+  const rangeOpts = RANGE_PRESET_DEFS
+    .map((d) => `<option value="${d.id}"${d.id === selectedPreset ? ' selected' : ''}>${i18n[d.key]}</option>`).join('');
+  const rangeIds = JSON.stringify(RANGE_PRESET_DEFS.map((d) => d.id));
   const htmlLang = langCode === 'en' ? 'en' : 'zh-CN';   // <html lang> 跟随语言设置
 
   return `<!DOCTYPE html><html lang="${htmlLang}">
@@ -443,7 +541,7 @@ h1{font-size:18px;font-weight:600}
 .toolbar-label{font-size:12px;color:var(--vscode-descriptionForeground)}
 .toolbar-r{display:flex;align-items:center;gap:10px}
 .updated-at{font-size:11px;color:var(--vscode-descriptionForeground);white-space:nowrap}
-.month-select{padding:5px 10px;background:var(--vscode-input-background);color:var(--vscode-editor-foreground);border:1px solid var(--vscode-widget-border,rgba(128,128,128,.25));border-radius:4px;font-size:13px;cursor:pointer}
+.range-select{padding:5px 10px;background:var(--vscode-input-background);color:var(--vscode-editor-foreground);border:1px solid var(--vscode-widget-border,rgba(128,128,128,.25));border-radius:4px;font-size:13px;cursor:pointer}
 .btn{padding:5px 14px;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:500}
 .btn-primary{background:var(--vscode-button-background);color:var(--vscode-button-foreground)}
 .btn-primary:hover:not(:disabled){background:var(--vscode-button-hoverBackground)}
@@ -501,8 +599,8 @@ h1{font-size:18px;font-weight:600}
 
 <div class="toolbar">
   <div class="toolbar-l">
-    <span class="toolbar-label">${i18n.monthLabel}</span>
-    <select class="month-select" id="monthSelect">${monthOpts}</select>
+    <span class="toolbar-label">${i18n.rangeLabel}</span>
+    <select class="range-select" id="rangeSelect">${rangeOpts}</select>
   </div>
   <div class="toolbar-r">
     <span class="updated-at" id="updatedAt" hidden></span>
@@ -538,6 +636,7 @@ h1{font-size:18px;font-weight:600}
 const vsc = acquireVsCodeApi();
 // 固定文案仅重建外壳时更新；运行期动态文案随数据一起推送更新
 var I18N = ${JSON.stringify(i18n).replace(/</g, '\\u003c')};
+var RANGE_IDS = ${rangeIds};
 var D = null;                 // 最近一次由扩展推送的数据
 var busySafety = null;        // 刷新按钮的兜底解锁计时器
 
@@ -630,29 +729,29 @@ function drawEmpty(ctx, w, h, text) {
 var costBars = [];
 
 function tipHtml(b) {
-  var rows = '<div class="tip-row tip-head"><span>' + D.year + '-' + b.date + '</span><span>¥' + fmtCost(b.cost) + '</span></div>';
+  var rows = '<div class="tip-row tip-head"><span>' + esc(b.tipHead || b.date) + '</span><span>¥' + fmtCost(b.cost) + '</span></div>';
   (b.parts || []).forEach(function(p) {
     rows += '<div class="tip-row"><span><i class="tip-dot" style="background:' + colorOf(p.model) + '"></i>' + esc(p.model) + '</span><span>¥' + fmtCost(p.cost) + '</span></div>';
   });
   return rows;
 }
 
-function drawDailyCostBar(canvas, days) {
+function drawCostBars(canvas, bars, granularity) {
   try {
     var ctx = getCtx(canvas.id); if (!ctx) return;
     var w = canvas.cw, h = canvas.ch;
     if (w < 40 || h < 40) return;   // 面板不可见时 getBoundingClientRect 全 0，会让 slot 变成 NaN
 
-    var emptyText = !(D && D.hasUsage) ? i18n().noSessionToken : (D.error ? i18n().loadFailed : i18n().noDataThisMonth);
-    if (!days || !days.length) { drawEmpty(ctx, w, h, emptyText); costBars = []; return; }
+    var emptyText = !(D && D.hasCreds) ? i18n().noSessionToken : (D.error ? i18n().loadFailed : i18n().noDataRange);
+    if (!bars || !bars.length) { drawEmpty(ctx, w, h, emptyText); costBars = []; return; }
 
     var maxRaw = 0;
-    days.forEach(function(d) { if (d.cost > maxRaw) maxRaw = d.cost; });
+    bars.forEach(function(b) { if (b.cost > maxRaw) maxRaw = b.cost; });
     if (maxRaw <= 0) { drawEmpty(ctx, w, h, emptyText); costBars = []; return; }
 
     var pad = { top: 12, right: 16, bottom: 26, left: 52 };
     var pw = w - pad.left - pad.right, ph = h - pad.top - pad.bottom;
-    var n = days.length, slot = pw / n;
+    var n = bars.length, slot = pw / n;
     var barW = Math.max(2, Math.min(18, slot * 0.72));
     var max = niceMax(maxRaw), steps = 4;
 
@@ -667,10 +766,10 @@ function drawDailyCostBar(canvas, days) {
 
     // 柱子 + 按模型堆叠（底部 = models[0]）
     costBars = [];
-    days.forEach(function(d, i) {
+    bars.forEach(function(b, i) {
       var x = pad.left + i * slot + (slot - barW) / 2;
       var sy = pad.top + ph;
-      var parts = d.parts || [];
+      var parts = b.parts || [];
       parts.forEach(function(p) {
         var sh = ph * (p.cost / max);
         if (sh <= 0) return;
@@ -678,16 +777,22 @@ function drawDailyCostBar(canvas, days) {
         ctx.fillStyle = colorOf(p.model);
         ctx.fillRect(x, sy, barW, sh);
       });
-      costBars.push({ x: pad.left + i * slot, w: slot, date: d.date, cost: d.cost, parts: parts });
+      costBars.push({ x: pad.left + i * slot, w: slot, bar: b });
     });
 
-    // x 轴标签抽稀（每 34px 最多一个）
-    var every = Math.max(1, Math.ceil(n / Math.max(2, Math.floor(pw / 34))));
+    // x 轴刻度：与官方用量页一致 —— 在首末之间均匀取若干个（首末必有），单行标注
+    var maxLabels = Math.max(2, Math.min(6, Math.floor(pw / 150)));
+    var count = Math.min(n, maxLabels);
+    var idxs = [];
+    for (var li = 0; li < count; li++) {
+      var ix2 = count === 1 ? 0 : Math.round(li * (n - 1) / (count - 1));
+      if (idxs.indexOf(ix2) < 0) idxs.push(ix2);
+    }
     ctx.textAlign = 'center'; ctx.fillStyle = gridColor(); ctx.font = '10px sans-serif';
-    days.forEach(function(d, i) {
-      if (i % every === 0 || i === n - 1) {
-        ctx.fillText(D.month + '/' + d.day, pad.left + i * slot + slot / 2, pad.top + ph + 14);
-      }
+    idxs.forEach(function(i2) {
+      var labels = bars[i2].label || [];
+      var cx = pad.left + i2 * slot + slot / 2;
+      for (var k = 0; k < labels.length; k++) ctx.fillText(labels[k], cx, pad.top + ph + 14 + k * 11);
     });
 
     // 按格命中（31 根细柱按柱命中太难）
@@ -698,10 +803,10 @@ function drawDailyCostBar(canvas, days) {
       if (mx < pad.left || mx > pad.left + pw) { hideChartTip(); return; }
       var idx = Math.floor((mx - pad.left) / slot);
       if (idx < 0 || idx >= costBars.length) { hideChartTip(); return; }
-      showChartTip(e, tipHtml(costBars[idx]));
+      showChartTip(e, tipHtml(costBars[idx].bar));
     };
     canvas.onmouseleave = hideChartTip;
-  } catch (e2) { console.error('drawDailyCostBar:', e2); }
+  } catch (e2) { console.error('drawCostBars:', e2); }
 }
 
 // ===== RENDER =====
@@ -736,14 +841,13 @@ function render() {
     setText('topupSub', d.keyDegraded ? (L.errNoApiKey + ' · ' + L.keySessionOnly) : L.errNoApiKey);
   }
 
-  // 卡B：今日消费（仅当月有意义）
-  if (!d.hasUsage) {
-    setText('todayValue', '—'); show('todaySuffix', false); setText('todaySub', L.noSessionToken);
-  } else if (!d.isCurrentMonth) {
-    setText('todayValue', '—'); show('todaySuffix', false); setText('todaySub', L.todayCurrentMonthOnly);
-  } else {
+  // 卡B：今日消费（始终表示今天，与图表所选窗口无关）
+  if (d.hasToday) {
     setText('todayValue', '¥' + fmtCost(d.todayCost)); show('todaySuffix', true);
     setText('todaySub', d.todayDate + ' · GMT+8');
+  } else {
+    setText('todayValue', '—'); show('todaySuffix', false);
+    setText('todaySub', !d.hasCreds ? L.noSessionToken : L.loadFailed);
   }
 
   // 三张指标卡
@@ -766,15 +870,11 @@ function render() {
   document.getElementById('costLegend').innerHTML = lg;
 }
 
-// 月份下拉：选项列表变更时才重建，否则只同步选中值，保证回滚时下拉框能跟随回滚
-function syncMonths() {
-  var sel = document.getElementById('monthSelect'); if (!sel || !D || !D.monthOptions) return;
-  var sig = D.monthOptions.join(',');
-  if (sel.getAttribute('data-sig') !== sig) {
-    sel.innerHTML = D.monthOptions.map(function(v) { return '<option value="' + v + '">' + v + '</option>'; }).join('');
-    sel.setAttribute('data-sig', sig);
-  }
-  if (D.monthValue && sel.value !== D.monthValue) sel.value = D.monthValue;
+// 时间窗口下拉：选项静态内联在外壳里，这里只同步选中值，并挂上区间说明
+function syncRanges() {
+  var sel = document.getElementById('rangeSelect'); if (!sel || !D || !D.preset) return;
+  if (RANGE_IDS.indexOf(D.preset) >= 0 && sel.value !== D.preset) sel.value = D.preset;
+  sel.title = D.rangeLabel || '';
 }
 
 // 画图：面板首次可见前 canvas 尺寸可能还是 0，用 rAF 重试一次
@@ -782,7 +882,7 @@ function drawChart(retried) {
   var c = document.getElementById('costChart'); if (!c) return;
   var r = c.getBoundingClientRect();
   if ((!r.width || !r.height) && !retried) { requestAnimationFrame(function() { drawChart(true); }); return; }
-  drawDailyCostBar(c, D && D.hasUsage ? D.days : []);
+  drawCostBars(c, D && D.hasUsage ? D.bars : [], D && D.granularity);
 }
 
 function setBusy(busy) {
@@ -804,7 +904,7 @@ function armBusySafety() {
 
 function applyData(payload) {
   D = payload || {}; if (!D.i18n) D.i18n = I18N;
-  render(); syncMonths(); drawChart();
+  render(); syncRanges(); drawChart();
   setBusy(!!D.busy);
   if (!D.busy && busySafety) { clearTimeout(busySafety); busySafety = null; }
 }
@@ -821,16 +921,16 @@ function doRefresh() {
   post('refresh');
 }
 
-function onMonthChange() {
-  var v = document.getElementById('monthSelect').value.split('-');
+function onRangeChange() {
+  var sel = document.getElementById('rangeSelect');
   setBusy(true); armBusySafety();
   toast(i18n().loading);
-  post('changeMonth', { year: parseInt(v[0]), month: parseInt(v[1]) });
+  post('changeRange', { preset: sel.value });
 }
 
 // ---- CSP-safe event binding (no inline onclick/onchange) ----
 document.getElementById('refreshBtn').addEventListener('click', doRefresh);
-document.getElementById('monthSelect').addEventListener('change', onMonthChange);
+document.getElementById('rangeSelect').addEventListener('change', onRangeChange);
 document.getElementById('setApiKeyBtn').addEventListener('click', function() {
   post('setApiKey');
 });
@@ -852,7 +952,7 @@ ro.observe(document.getElementById('costWrap'));
   var ctx = getCtx(c.id);
   if (ctx) drawEmpty(ctx, c.cw, c.ch, I18N.loading || '');
 })();
-syncMonths();
+syncRanges();
 post('ready');
 })();
 </script></body></html>`;
@@ -933,7 +1033,7 @@ async function activate(context) {
       lateWaitRunning = false;
       if (apiKeyCache !== undefined) return;   // 期间用户已存过新 key，防止旧值覆盖
       apiKeyCache = v || '';
-      if (apiKeyCache) refresh(currentMonth, currentYear, 'late-key');
+      if (apiKeyCache) refresh(undefined, 'late-key');
     }, () => { lateWaitRunning = false; });
   }
 
@@ -951,7 +1051,7 @@ async function activate(context) {
     const cfg = config();
     // 首次调用后台预热（不 await），这样刷新永远不被 secrets 拖住
     if (apiKeyCache === undefined) {
-      warmApiKey().then((got) => { if (got) refresh(currentMonth, currentYear, 'key-ready'); }).catch(() => {});
+      warmApiKey().then((got) => { if (got) refresh(undefined, 'key-ready'); }).catch(() => {});
     }
     return {
       apiKey: apiKeyCache !== undefined ? (apiKeyCache || configApiKey()) : configApiKey(),
@@ -960,55 +1060,100 @@ async function activate(context) {
   }
 
   // ---- Data ----
-  let latestData = { balance: null, usage: null, error: null };
+  // usage = 所选窗口（喂图表与三项指标）；month = 与窗口无关的本月快照（喂今日卡与状态栏）
+  let latestData = { balance: null, usage: null, month: null, hasCreds: false, error: null, errorText: null };
   let lastUpdatedAt = null;   // 最近一次成功取到数据的时刻（面板显示"数据更新时间"）
-  let currentMonth, currentYear;
+  // 面板时间窗口：读取持久化值，非法或已删除的 id 一律回落默认预设
+  let currentPreset = (() => { const v = context.globalState.get(PRESET_STATE_KEY); return isPreset(v) ? v : DEFAULT_PRESET; })();
+  function savePreset(id) { Promise.resolve(context.globalState.update(PRESET_STATE_KEY, id)).catch(() => {}); }
   let refreshInFlight = null;   // 进行中的刷新 Promise；null = 空闲
   let refreshQueued = null;     // 执行期间到达的刷新请求，仅保留最后一次，结束后补跑；用于串行化，避免并发写 latestData 与重复请求
   let refreshBusy = false;      // 刷新状态标志
 
-  async function refreshAllData(month, year, source) {
-    const now = new Date(); month = month || now.getMonth() + 1; year = year || now.getFullYear();
-    currentMonth = month; currentYear = year;
+  // 用窗口区间取用量；结构无法识别时如实报错，不做静默回退
+  async function fetchUsageSpec(sessionToken, cookie, proxy, spec, nowMs) {
+    const { amount, cost } = await fetchUsageRange(sessionToken, cookie, proxy, spec.startSec, spec.endSec);
+    const agg = aggregateUsageRange(amount, cost, spec, nowMs);
+    if (!agg) throw new Error('Invalid response (unrecognized usage payload)');
+    return agg;
+  }
+
+  // 与窗口无关的本月快照。优先用独立拉取的本月窗口；窗口自身已覆盖"本月 1 日 → 现在"时复用窗口数据；
+  // 都不满足（昨天 / 上月）时今日值未知，如实返回 null（面板与状态栏显示 —）。
+  function buildMonthSnapshot({ monthAgg, windowAgg, spec, nowMs }) {
+    const now = nowMs == null ? Date.now() : nowMs;
+    const t8 = new Date(now + TZ8_OFFSET_MS);
+    const todayDate = `${pad2(t8.getUTCMonth() + 1)}-${pad2(t8.getUTCDate())}`;
+    const lastOf = (agg) => (agg && agg.bars.length ? agg.bars[agg.bars.length - 1] : null);
+    if (monthAgg) {
+      const bar = lastOf(monthAgg);   // 本月窗口的最后一根即今天
+      return { totalCost: monthAgg.totalCost, todayCost: bar ? bar.cost : 0, todayTokens: bar ? bar.tokens : 0, todayDate };
+    }
+    if (!windowAgg) return null;
+    if (coversMonthToDate(spec, now)) {
+      const bar = lastOf(windowAgg);
+      return { totalCost: windowAgg.totalCost, todayCost: bar ? bar.cost : 0, todayTokens: bar ? bar.tokens : 0, todayDate };
+    }
+    if (spec.id === 'today') {
+      return { totalCost: null, todayCost: windowAgg.totalCost, todayTokens: windowAgg.totalTokens, todayDate };
+    }
+    if (spec.granularity === 'day') {
+      const bar = lastOf(windowAgg);
+      if (bar && bar.date === todayDate) return { totalCost: null, todayCost: bar.cost, todayTokens: bar.tokens, todayDate };
+    }
+    return { totalCost: null, todayCost: null, todayTokens: null, todayDate };
+  }
+
+  async function refreshAllData(presetId, nowMs) {
+    const now = nowMs == null ? Date.now() : nowMs;
+    if (isPreset(presetId)) currentPreset = presetId;
+    const spec = resolveRange(currentPreset, now);
 
     const cfg = await getConfig();
-    latestData = { balance: null, usage: null, error: null };
+    const hasCreds = !!(cfg.sessionToken && cfg.cookie);
+    const needMonth = hasCreds && !coversMonthToDate(spec, now);
+    latestData = { balance: null, usage: null, month: null, hasCreds, error: null, errorText: null };
 
     const results = await Promise.allSettled([
       cfg.apiKey ? fetchBalance(cfg.apiKey) : Promise.reject(new Error('no-api-key')),
-      cfg.sessionToken && cfg.cookie ? fetchMonthData(cfg.sessionToken, cfg.cookie, cfg.proxy, month, year) : Promise.reject(new Error('no-session')),
+      hasCreds ? fetchUsageSpec(cfg.sessionToken, cfg.cookie, cfg.proxy, spec, now) : Promise.reject(new Error('no-session')),
+      needMonth ? fetchUsageSpec(cfg.sessionToken, cfg.cookie, cfg.proxy, resolveRange('thisMonth', now), now) : Promise.resolve(null),
     ]);
 
     const errors = [];
+    const pushErr = (scope, m) => { if (!errors.some(([sc, mm]) => sc === scope && mm === m)) errors.push([scope, m]); };
     if (results[0].status === 'fulfilled') latestData.balance = results[0].value;
-    else if (results[0].reason.message !== 'no-api-key') errors.push(['Balance', results[0].reason.message]);
+    else if (results[0].reason.message !== 'no-api-key') pushErr('Balance', results[0].reason.message);
     if (results[1].status === 'fulfilled') latestData.usage = results[1].value;
-    else if (results[1].reason.message !== 'no-session') errors.push(['Usage', results[1].reason.message]);
+    else if (results[1].reason.message !== 'no-session') pushErr('Usage', results[1].reason.message);
+    const monthAgg = results[2].status === 'fulfilled' ? results[2].value : null;
+    if (results[2].status === 'rejected' && needMonth) pushErr('Usage', results[2].reason.message);
+    latestData.month = buildMonthSnapshot({ monthAgg, windowAgg: latestData.usage, spec, now });
     // error 保留异常原文（面板 hover、日志排查用）；errorText 是展示给用户的本地化文案
     latestData.error = errors.length ? errors.map(([scope, m]) => scope + ': ' + m).join(' | ') : null;
     latestData.errorText = errors.length
       ? errors.map(([scope, m]) => tf('errEntry', scope === 'Balance' ? t().errScopeBalance : t().errScopeUsage, humanizeError(m))).join(' | ')
       : null;
 
-    if (latestData.balance || latestData.usage) lastUpdatedAt = Date.now();
+    if (latestData.balance || latestData.usage || latestData.month) lastUpdatedAt = Date.now();
 
     updateStatusBar();
   }
 
   // 刷新入口：串行化执行，同一时刻至多一次；执行期间到达的请求合并为一次尾随刷新
-  function refresh(month, year, source) {
-    if (refreshInFlight) { refreshQueued = { month, year, source }; return refreshInFlight; }
+  function refresh(presetId, source) {
+    if (refreshInFlight) { refreshQueued = { preset: presetId, source }; return refreshInFlight; }
     refreshBusy = true;
     pushData(); // 推送 busy=true，供按钮反馈
     refreshInFlight = (async () => {
-      try { await refreshAllData(month, year, source); }
+      try { await refreshAllData(presetId, undefined); }
       // 兜底：刷新流程本身抛异常（非接口错误）时同样给出两份文案，避免 errorText 残留上一次的
       catch (e) { latestData.error = (e && e.message) || String(e); latestData.errorText = humanizeError(latestData.error); }
       finally {
         refreshBusy = false; refreshInFlight = null;
         const q = refreshQueued; refreshQueued = null;
         pushData(); // 推送数据（或错误）
-        if (q) refresh(q.month, q.year, q.source);
+        if (q) refresh(q.preset, q.source);
       }
     })();
     return refreshInFlight;
@@ -1034,16 +1179,16 @@ async function activate(context) {
   }
 
   function updateStatusBar() {
-    const { balance, usage, error, errorText } = latestData;
+    const { balance, usage, month, error, errorText } = latestData;
     if (error) { statusBarItem.text = '$(error) DeepSeek Usage'; statusBarItem.tooltip = errorText ? `${errorText}\n(${error})` : error; statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground'); return; }
     const bal = balance?.balance_infos?.[0]; const balTotal = bal ? parseFloat(bal.total_balance).toFixed(2) : null;
-    const cost = usage ? usage.totalCost.toFixed(2) : null;
-    // 往月的 todayCost/todayTokens 为 null（"今日"对往月无意义），与面板一致显示 —
-    const today = usage && usage.todayCost != null ? usage.todayCost.toFixed(2) : null;
-    const todayTokens = usage && usage.todayTokens != null ? usage.todayTokens : null;
+    // 状态栏的"本月/本日"恒为当前月与今天，与面板所选窗口无关
+    const cost = month && month.totalCost != null ? month.totalCost.toFixed(2) : null;
+    const today = month && month.todayCost != null ? month.todayCost.toFixed(2) : null;
+    const todayTokens = month && month.todayTokens != null ? month.todayTokens : null;
 
     // 未配置任何凭证时保留引导，避免状态栏显示一长串 —
-    if (!balTotal && !usage) {
+    if (!balTotal && !month && !usage) {
       statusBarItem.text = '$(key) DeepSeek Usage';
       statusBarItem.tooltip = keyDegraded ? `${t().errNoApiKey}\n${t().keySessionOnly}` : t().errNoApiKey;
       statusBarItem.backgroundColor = undefined;
@@ -1064,7 +1209,8 @@ async function activate(context) {
 
   // 面板数据载荷（结构对应 webview 里的 D）
   function buildPayload() {
-    const { balance, usage, error, errorText } = latestData;
+    const { balance, usage, month, error, errorText, hasCreds } = latestData;
+    const spec = resolveRange(currentPreset);
     const balInfo = (balance && Array.isArray(balance.balance_infos) && balance.balance_infos.length) ? balance.balance_infos[0] : null;
     const bal = balInfo ? {
       toppedUp: parseFloat(balInfo.topped_up_balance) || 0,
@@ -1073,18 +1219,25 @@ async function activate(context) {
       insufficient: balance.is_available === false,
     } : null;
     return {
-      i18n: t(), month: currentMonth, year: currentYear, monthValue: `${currentYear}-${pad2(currentMonth)}`,
-      monthOptions: monthOptions(),
+      i18n: t(),
+      preset: currentPreset,                        // 六个预设 id 之一
+      rangeLabel: fmtRangeLabel(spec),              // 悬停下拉时显示具体区间
+      rangeStart: spec.startSec, rangeEnd: spec.endSec,
+      granularity: usage ? usage.granularity : spec.granularity,   // 失败时仍按预设，空图坐标轴才正确
+      bucket: usage ? usage.spec.slotSec : spec.slotSec,
       busy: refreshBusy,
       keyDegraded,
       error: error || null,
       errorText: errorText || null,
       updatedAt: lastUpdatedAt,
       hasBalance: !!balInfo, bal,
+      hasCreds,                                     // 区分"没配凭证"与"拉取失败"
       hasUsage: !!usage,
-      models: usage ? usage.models : [], days: usage ? usage.days : [],
+      models: usage ? usage.models : [], bars: usage ? usage.bars : [],
       totalCost: usage ? usage.totalCost : 0, totalTokens: usage ? usage.totalTokens : 0, totalReqs: usage ? usage.totalReqs : 0,
-      isCurrentMonth: usage ? usage.isCurrentMonth : false, todayDate: usage ? usage.todayDate : '', todayCost: usage ? usage.todayCost : null,
+      monthCost: month ? month.totalCost : null,    // 与窗口无关
+      hasToday: !!(month && month.todayCost != null),
+      todayDate: month ? month.todayDate : '', todayCost: month ? month.todayCost : null, todayTokens: month ? month.todayTokens : null,
     };
   }
 
@@ -1098,7 +1251,7 @@ async function activate(context) {
     if (!currentPanel) return;
     panelReady = false;
     panelLang = langKey();
-    currentPanel.webview.html = buildPanelHtml(t(), langKey());
+    currentPanel.webview.html = buildPanelHtml(t(), langKey(), currentPreset);
   }
 
   function openUsagePanel() {
@@ -1110,7 +1263,7 @@ async function activate(context) {
     currentPanel = vscode.window.createWebviewPanel('deepseekUsage', t().title, vscode.ViewColumn.Two, { enableScripts: true, retainContextWhenHidden: true });
     panelReady = false; panelLang = langKey();
     // 外壳只在这里（以及语言变化时）设置一次
-    currentPanel.webview.html = buildPanelHtml(t(), langKey());
+    currentPanel.webview.html = buildPanelHtml(t(), langKey(), currentPreset);
 
     currentPanel.webview.onDidReceiveMessage(async (msg) => {
       try {
@@ -1118,25 +1271,15 @@ async function activate(context) {
           panelReady = true;
           pushData();
           // 首屏可能还没有数据（激活时的首次刷新仍在等待返回），这里补推一次数据
-          if (!refreshInFlight && !latestData.balance && !latestData.usage) refresh(currentMonth, currentYear, 'ready');
+          if (!refreshInFlight && !latestData.balance && !latestData.usage) refresh(undefined, 'ready');
         } else if (msg.type === 'refresh') {
-          await refresh(currentMonth, currentYear, 'panel');
-        } else if (msg.type === 'changeMonth') {
-          // 失败时需要回滚月份，否则下拉框、页面数据与内部状态将不一致导致错误
-          const prev = { month: currentMonth, year: currentYear, data: latestData };
-          await refresh(msg.month, msg.year, 'month');
-          // 未配置凭证（无 error）时照常渲染，面板提示需配置凭证；
-          // 只有凭证已配置情况下请求拉取失败（如 session 过期）时才回滚月份 + 弹出错误
-          if (!latestData.usage && !latestData.balance && latestData.error) {
-            // 回滚会把 latestData 换成上一次的数据，失败原因须先取出
-            const failedReason = latestData.errorText || latestData.error;
-            currentMonth = prev.month; currentYear = prev.year; latestData = prev.data;
-            updateStatusBar();
-            pushData(); // 同时回滚下拉框与面板数据至上一个月份
-            vscode.window.showErrorMessage(
-              tf('loadMonthFailed', `${msg.year}-${pad2(msg.month)}`, failedReason || tf('checkSessionToken'))
-            );
-          }
+          await refresh(undefined, 'panel');
+        } else if (msg.type === 'changeRange') {
+          const id = String(msg.preset || '');
+          if (!isPreset(id)) { pushData(); return; }   // 非法值：下拉由载荷里的 preset 拉回
+          currentPreset = id;                          // 选择即状态：不因拉取失败回滚
+          savePreset(id);
+          await refresh(id, 'range');                  // 失败也不弹窗，错误经面板横条呈现
         } else if (msg.type === 'setApiKey') {
           await promptApiKeyFlow();
         } else if (msg.type === 'openSettings') {
@@ -1158,7 +1301,7 @@ async function activate(context) {
     stopAutoRefresh();
     const minutes = Number(config().get('refreshInterval', 1));
     if (!(minutes > 0)) return;
-    refreshTimer = setInterval(() => refresh(currentMonth, currentYear, 'auto'), minutes * 60 * 1000);
+    refreshTimer = setInterval(() => refresh(undefined, 'auto'), minutes * 60 * 1000);
   }
 
   // ---- Set API Key flow（命令面板与面板按钮共用）----
@@ -1182,7 +1325,7 @@ async function activate(context) {
         keyDegraded = true;
         vscode.window.showWarningMessage(t().keyPersistFailed);
       }
-      refresh(currentMonth, currentYear, 'setApiKey');
+      refresh(undefined, 'setApiKey');
       return;
     }
   }
@@ -1190,19 +1333,19 @@ async function activate(context) {
   // ---- Commands ----
   context.subscriptions.push(
     vscode.commands.registerCommand('deepseek-usage-monitor.showUsage', () => openUsagePanel()),
-    vscode.commands.registerCommand('deepseek-usage-monitor.refresh', () => refresh(currentMonth, currentYear, 'command')),
+    vscode.commands.registerCommand('deepseek-usage-monitor.refresh', () => refresh(undefined, 'command')),
     vscode.commands.registerCommand('deepseek-usage-monitor.setApiKey', () => promptApiKeyFlow()),
     vscode.workspace.onDidChangeConfiguration(e => {
       if (!e.affectsConfiguration('deepseek-usage-monitor')) return;
       if (e.affectsConfiguration('deepseek-usage-monitor.refreshInterval')) startAutoRefresh();
       if (e.affectsConfiguration('deepseek-usage-monitor.language') && currentPanel) rebuildShell();
-      refresh(currentMonth, currentYear, 'config');
+      refresh(undefined, 'config');
     }),
     statusBarItem
   );
 
   // Init —— 首刷不阻塞 activate()：网络慢时会让扩展激活挂起数秒（请求超时上限 15s），状态栏先显示加载态即可
-  refresh(undefined, undefined, 'init');
+  refresh(undefined, 'init');
   // 自动刷新必须带上当前选中的月份，否则会把用户选的月份重置回当月
   startAutoRefresh();
   context.subscriptions.push({ dispose: stopAutoRefresh });
@@ -1210,4 +1353,7 @@ async function activate(context) {
 }
 
 function deactivate() { console.log('[DeepSeek Usage Monitor] Deactivated'); }
-module.exports = { activate, deactivate };
+module.exports = { activate, deactivate, __test: {
+  resolveRange, slotStartSec, visibleSlotCount, coversMonthToDate, bucketSecOf,
+  aggregateUsageRange, fmtRangeLabel, RANGE_PRESET_DEFS, DEFAULT_PRESET,
+} };
