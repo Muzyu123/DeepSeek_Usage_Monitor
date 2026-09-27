@@ -2,6 +2,12 @@
 
 [简体中文](CHANGELOG.md) ｜ **English**
 
+## 1.2.1 — 2026-09-27
+
+### Fixed
+
+- Fixed some text errors in README.md.
+
 ## 1.2.0 — 2026-09-27
 
 ### Changed

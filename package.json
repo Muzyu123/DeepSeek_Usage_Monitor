@@ -2,7 +2,7 @@
   "name": "deepseek-usage-monitor",
   "displayName": "DeepSeek Usage Monitor",
   "description": "%extension.description%",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "publisher": "Muzyu",
   "license": "MIT",
   "icon": "icon.png",

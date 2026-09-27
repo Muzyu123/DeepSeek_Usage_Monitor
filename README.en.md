@@ -8,8 +8,8 @@ Keep an eye on your DeepSeek API balance and usage inside VSCode: a customizable
 
 [简体中文](README.md) ｜ **English**
 
-> Comments and bug reports are welcome in my repository: https://github.com/Muzyu123/DeepSeek_Usage_Monitor — if this extension helps you, a Star would be appreciated.
-> This project is a refactor of the MIT-licensed project by linnin233: https://github.com/linnin233/deepseek-usage-vscode — the extension there is called “Deepseek Usage & Cost”, go give the original author some support!
+> Comments and bug reports are welcome in my repository: https://github.com/Muzyu123/DeepSeek_Usage_Monitor — if this extension helps you, a Star would be appreciated.<br>
+> This project is a refactor of the MIT-licensed project by linnin233: https://github.com/linnin233/deepseek-usage-vscode — the extension there is called “Deepseek Usage & Cost”, go give the original author some support!<br>
 > This project is not affiliated with the original author or with DeepSeek.
 
 ## Features

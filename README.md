@@ -7,8 +7,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **简体中文** ｜ [English](README.en.md)
-> 欢迎到我的开源仓库 https://github.com/Muzyu123/DeepSeek_Usage_Monitor 提出意见、反馈问题，如果有帮助到你请点亮 Star 哦
-> 本项目重构修改自 linnin233 的 MIT 项目：https://github.com/linnin233/deepseek-usage-vscode， 插件名称为“Deepseek Usage & Cost”，可以支持一下原作者！
+> 欢迎到我的开源仓库 https://github.com/Muzyu123/DeepSeek_Usage_Monitor 提出意见、反馈问题，如果有帮助到你请点亮 Star 哦<br>
+> 本项目重构修改自 linnin233 的 MIT 项目：https://github.com/linnin233/deepseek-usage-vscode  插件名称为“Deepseek Usage & Cost”，可以支持一下原作者！<br>
 > 本项目与原作者及 DeepSeek 官方均无隶属关系
 
 ## 功能
