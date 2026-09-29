@@ -1,8 +1,8 @@
 {
   "name": "deepseek-usage-monitor",
-  "displayName": "DeepSeek Usage Monitor",
+  "displayName": "DeepSeek Usage Monitor & Dashboard",
   "description": "%extension.description%",
-  "version": "1.2.1",
+  "version": "2.0.0",
   "publisher": "Muzyu",
   "license": "MIT",
   "icon": "icon.png",
@@ -33,7 +33,7 @@
   "main": "./extension.js",
   "contributes": {
     "configuration": {
-      "title": "DeepSeek Usage Monitor",
+      "title": "DeepSeek Usage Monitor & Dashboard",
       "properties": {
         "deepseek-usage-monitor.sessionToken": {
           "type": "string",
@@ -92,6 +92,28 @@
           "minimum": 0,
           "markdownDescription": "%config.refreshInterval.markdownDescription%",
           "order": 7
+        },
+        "deepseek-usage-monitor.dashboard.backgroundColor": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "%config.dashboardBackgroundColor.markdownDescription%",
+          "order": 8
+        },
+        "deepseek-usage-monitor.dashboard.backgroundDim": {
+          "type": "number",
+          "default": 0.4,
+          "minimum": 0,
+          "maximum": 0.9,
+          "markdownDescription": "%config.dashboardBackgroundDim.markdownDescription%",
+          "order": 9
+        },
+        "deepseek-usage-monitor.dashboard.cardOpacity": {
+          "type": "number",
+          "default": 0.82,
+          "minimum": 0.3,
+          "maximum": 1,
+          "markdownDescription": "%config.dashboardCardOpacity.markdownDescription%",
+          "order": 10
         }
       }
     },
@@ -107,6 +129,22 @@
       {
         "command": "deepseek-usage-monitor.setApiKey",
         "title": "%command.setApiKey%"
+      },
+      {
+        "command": "deepseek-usage-monitor.setDashboardBackground",
+        "title": "%command.setDashboardBackground%"
+      },
+      {
+        "command": "deepseek-usage-monitor.clearDashboardBackground",
+        "title": "%command.clearDashboardBackground%"
+      },
+      {
+        "command": "deepseek-usage-monitor.exportConfig",
+        "title": "%command.exportConfig%"
+      },
+      {
+        "command": "deepseek-usage-monitor.importConfig",
+        "title": "%command.importConfig%"
       }
     ]
   },

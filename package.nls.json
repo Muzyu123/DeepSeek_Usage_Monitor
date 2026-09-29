@@ -6,7 +6,14 @@
   "config.sessionToken.description": "Platform session token (Bearer ...). Required to query usage data. How to get it: sign in to platform.deepseek.com/usage → press F12 (or right-click → Inspect) → Network → reload the page → find the cost?start=xxx request → copy the value after Bearer in the Authorization request header.",
   "config.cookie.description": "Browser cookie string. Required for usage API authentication. Same steps as above; the Cookie request header usually sits right below Authorization.",
   "config.proxy.description": "HTTP proxy URL (optional). Fill this in if you need a proxy to reach the platform; leave it empty for a direct connection.",
-  "config.language.description": "Language of the dashboard and extension messages. This setting does not affect the text on the VSCode settings page.",
+  "config.language.description": "Language of the dashboard and extension messages (the text on the VSCode settings page follows VSCode's own display language).",
   "config.statusBarItems.markdownDescription": "Which items the status bar shows (**array order = display order**); leave empty to show the icon only.\n\n- `todayCost` — Today: ¥xx.xx\n- `monthCost` — Month: ¥xx.xx\n- `balance` — Balance: ¥xx.xx\n- `todayTokens` — Today xxx tokens\n\nMissing values are shown as `—` (today/month data needs Session Token & Cookie).",
-  "config.refreshInterval.markdownDescription": "Auto-refresh interval (**in minutes**). Default `1`. Decimals are allowed (e.g. `0.5` = 30 seconds); set `0` to disable auto-refresh."
+  "config.refreshInterval.markdownDescription": "Auto-refresh interval (**in minutes**). Default `1`. Decimals are allowed (e.g. `0.5` = 30 seconds); set `0` to disable auto-refresh.",
+  "command.setDashboardBackground": "DeepSeek Usage Monitor: Set Dashboard Background",
+  "command.clearDashboardBackground": "DeepSeek Usage Monitor: Clear Dashboard Background",
+  "config.dashboardBackgroundColor.markdownDescription": "Custom dashboard background (only effective when no background image is set): a CSS color (`#0b1220`, `rgb(11,18,32)`) or a gradient (`linear-gradient(135deg,#0b1220,#1b2a4a)`); leave empty to follow the VSCode theme. To use an image, set it separately.",
+  "config.dashboardBackgroundDim.markdownDescription": "Dimming applied over the background image (`0`–`0.9`), which keeps the text readable. Affects the background image only.",
+  "command.exportConfig": "DeepSeek Usage Monitor: Export Configuration",
+  "command.importConfig": "DeepSeek Usage Monitor: Import Configuration",
+  "config.dashboardCardOpacity.markdownDescription": "Opacity of the card background when a custom background (image or color) is active (`0.3`-`1`). Lower values let the background show through, with less text contrast. No effect in high-contrast themes (cards stay opaque)."
 }

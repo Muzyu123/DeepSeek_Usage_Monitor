@@ -1,5 +1,5 @@
 /*
- * DeepSeek Usage Monitor — VSCode Extension
+ * DeepSeek Usage Monitor & Dashboard for VS Code
  * 基于 linnin233 的 MIT 项目：https://github.com/linnin233/deepseek-usage-vscode 进行了前端重构、后端修补和部分功能自定义
  *
  * 数据源：
@@ -14,12 +14,26 @@ const vscode = require('vscode');
 const https = require('https');
 const http = require('http');
 const tls = require('tls');
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 // 系统 keyring 缺失时（如 Linux 无 org.freedesktop.secrets）会造成进程阻塞
 // 所以 secrets 读取一律带超时 + 内存缓存
 const SECRETS_KEY = 'deepseek-usage-monitor.apiKey';
 const PRESET_STATE_KEY = 'deepseekUsage.rangePreset';   // 面板时间窗口的持久化键
 const SECRETS_TIMEOUT_MS = 2000; // 等待 secrets 响应超时的阈值，超时后降级为内存缓存并报错，API Key 只在本次会话有效
+
+// 面板背景图：文件名存 globalState，文件本体存 globalStorage/background（详见 Dashboard Background 段）
+const BG_IMAGE_KEY = 'deepseekUsage.bgImage';   // 存储名（含内容哈希），同时是 webview URL 的来源
+const BG_LABEL_KEY = 'deepseekUsage.bgLabel';   // 用户原文件名，仅用于界面展示
+const BG_DIR_NAME = 'background';
+const BG_EXT_LIST = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
+const BG_MAX_BYTES = 5 * 1024 * 1024;   // 上限 5MB：webview 按解码后的位图驻留内存，过大影响面板响应
+const BG_DIM_DEFAULT = 0.4;
+const BG_DIM_MAX = 0.9;
+const BG_CARD_OPACITY_DEFAULT = 0.82;   // 有背景时卡片底色不透明度；下限保证文字仍可读
+const BG_CARD_OPACITY_MIN = 0.3;
 
 // ============================================================
 //  Constants & i18n
@@ -49,7 +63,10 @@ const L10N = {
     noDataRange: 'No cost data in this period',
     updatedAtLabel: 'Updated {0}',
     loading: 'Loading...', refresh: 'Refresh',
-    settings: '⚙ Settings', setApiKey: 'Set API Key',
+    settings: '⚙ Settings', setApiKey: 'Set API Key', setBg: 'Set Background',
+    menuTitle: 'Settings', menuOpenSettings: 'Open Settings',
+    menuConfigTransfer: 'Migrate configuration',
+    menuImport: 'Import configuration', menuExport: 'Export configuration',
     sbTodayCost: 'Today', sbMonthCost: 'Month', sbBalance: 'Balance', sbTodayTokens: 'Today',
     noSessionToken: 'Configure Session Token & Cookie',
     errNoApiKey: 'Set API Key',
@@ -82,6 +99,37 @@ const L10N = {
     genericError: 'DeepSeek Usage error: {0}',
     clickDetails: 'Click for details',
     granted: 'Granted',
+    bgPickTitle: 'Select a background image',
+    bgPathPrompt: 'Enter the absolute path of the image on the machine running the extension host',
+    bgFileMissing: 'File not found: {0}',
+    bgBadFormat: 'Unsupported image format: {0}',
+    bgTooLarge: 'Image is too large ({0} MB); the limit is {1} MB',
+    bgSet: 'Dashboard background image set',
+    bgCleared: 'Dashboard background image cleared',
+    bgPickActionTitle: 'Select an action',
+    chartColorsBtn: 'Colors',
+    colorModeLabel: 'Color mode',
+    colorModeOfficial: 'Official palette',
+    colorModeModel: 'Per model',
+    colorModeMono: 'Auto shades',
+    colorBaseLabel: 'Base color',
+    colorClose: 'Close',
+    exportConfigTitle: 'Export configuration',
+    importConfigTitle: 'Select a configuration file to import',
+    exportDone: 'Configuration exported: {0}',
+    exportFailed: 'Export failed: {0}',
+    importBadFile: 'Not a DeepSeek Usage Monitor configuration file',
+    importBadVersion: 'Configuration version {0} is newer than this extension supports ({1})',
+    importReadFailed: 'Failed to read the file: {0}',
+    importNothing: 'Nothing to import in this file',
+    importConfirmMsg: 'Import {0} setting(s) and {1} state item(s); {2} skipped. Existing values will be overwritten.',
+    importConfirm: 'Apply',
+    importApplied: 'Configuration imported: {0} setting(s), {1} state item(s)',
+    importSkipped: 'Skipped {0} item(s): {1}',
+    bgChangeOption: 'Change background image',
+    bgClearOption: 'Clear background image',
+    bgCurrentFile: 'Current: {0}',
+    bgNoneSet: 'No background image set',
   },
   'zh-cn': {
     title: 'DeepSeek Usage',
@@ -103,7 +151,10 @@ const L10N = {
     noDataRange: '该时间段暂无消费数据',
     updatedAtLabel: '数据更新时间 {0}',
     loading: '加载中...', refresh: '刷新',
-    settings: '⚙ 设置', setApiKey: '设置 API Key',
+    settings: '⚙ 设置', setApiKey: '设置 API Key', setBg: '设置背景图',
+    menuTitle: '设置', menuOpenSettings: '打开设置',
+    menuConfigTransfer: '迁移配置',
+    menuImport: '读取配置', menuExport: '导出配置',
     sbTodayCost: '本日消费', sbMonthCost: '本月消费', sbBalance: '账户余额', sbTodayTokens: '本日消耗',
     noSessionToken: '请在设置中配置 Session Token 和 Cookie',
     errNoApiKey: '请设置 API Key',
@@ -136,6 +187,37 @@ const L10N = {
     genericError: 'DeepSeek Usage 出错：{0}',
     clickDetails: '点击查看详情',
     granted: '赠送',
+    bgPickTitle: '选择背景图片',
+    bgPathPrompt: '请输入图片在扩展宿主所在机器上的绝对路径',
+    bgFileMissing: '文件不存在：{0}',
+    bgBadFormat: '不支持的图片格式：{0}',
+    bgTooLarge: '图片过大（{0} MB），上限 {1} MB',
+    bgSet: '面板背景图已设置',
+    bgCleared: '面板背景图已清除',
+    bgPickActionTitle: '请选择操作',
+    chartColorsBtn: '配色',
+    colorModeLabel: '配色方式',
+    colorModeOfficial: '官方色阶',
+    colorModeModel: '按模型指定',
+    colorModeMono: '单主色阶梯',
+    colorBaseLabel: '主色',
+    colorClose: '关闭',
+    exportConfigTitle: '导出配置',
+    importConfigTitle: '选择要读取的配置文件',
+    exportDone: '配置已导出：{0}',
+    exportFailed: '导出失败：{0}',
+    importBadFile: '不是本扩展的配置文件',
+    importBadVersion: '配置文件版本 {0} 高于当前扩展支持的版本（{1}）',
+    importReadFailed: '读取文件失败：{0}',
+    importNothing: '该文件中没有可导入的项',
+    importConfirmMsg: '将导入：设置 {0} 项、状态 {1} 项；跳过 {2} 项。同名项会被覆盖。',
+    importConfirm: '应用',
+    importApplied: '配置已读取：设置 {0} 项、状态 {1} 项',
+    importSkipped: '已跳过 {0} 项：{1}',
+    bgChangeOption: '更换背景图',
+    bgClearOption: '清空背景图',
+    bgCurrentFile: '当前：{0}',
+    bgNoneSet: '当前未设置背景图',
   },
 };
 
@@ -503,17 +585,274 @@ function aggregateUsageRange(amountJson, costJson, spec, nowMs) {
 
 
 // ============================================================
+//  Dashboard Background
+// ============================================================
+//
+// 背景有两个来源：设置项 dashboard.backgroundColor（纯色或渐变），以及命令选定的图片。
+// 图片不引用用户原路径：复制进 globalStorage/background 后经 asWebviewUri 加载。
+// 由此 localResourceRoots 只需该固定目录，原文件被移动或删除也不影响已设置的背景。
+
+// 颜色/渐变白名单：字符集排除引号、分号、花括号、反斜杠、斜杠、冒号与 @，
+// 因此该值不能逃出 style 块，也不能构造 url() 外链或 CSS 注释；函数另按名称排除。
+// 设置值可能来自工作区 settings.json（他人仓库），校验不通过一律按未设置处理。
+function sanitizeBgValue(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s || s.length > 200) return '';
+  if (!/^[A-Za-z0-9#%.,()\s-]+$/.test(s)) return '';
+  if (/\b(url|var|attr|expression|image-set)\s*\(/i.test(s)) return '';
+  if (/^(#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})|rgba?\([0-9\s.,%]+\)|hsla?\([0-9\s.,%]+\)|[a-z]{3,20})$/i.test(s)) return s;
+  if (/^(linear|radial|conic)-gradient\((?:[^()]|\([^()]*\))+\)$/i.test(s)) return s;
+  return '';
+}
+
+function bgDirPath(context) { return path.join(context.globalStorageUri.fsPath, BG_DIR_NAME); }
+
+// 只保留基名，滤掉目录分隔符、控制字符与其它符号；Unicode 字母数字（含中文）保留，
+// 否则 两个jpg文件会同时被抹成 __.jpg，落成同一个文件、同一个 webview URL
+function bgSafeName(filePath) {
+  const base = path.basename(String(filePath || ''))
+    .replace(/[^\p{L}\p{N}._-]/gu, '_')
+    .replace(/^\.+/, '');
+  return Array.from(base).slice(0, 80).join('');   // 按码位截断，避免截断代理对
+}
+
+// 图片实际路径：未设置、文件名非法或文件已被删除时返回空串（面板按无背景渲染）
+function bgImagePath(context) {
+  const name = String(context.globalState.get(BG_IMAGE_KEY, '') || '');
+  if (!/^[\p{L}\p{N}._-]{1,80}$/u.test(name) || /^\.+$/.test(name)) return '';   // 全点的名字（. / ..）不接受
+  const p = path.join(bgDirPath(context), name);
+  try { return fs.statSync(p).isFile() ? p : ''; } catch { return ''; }
+}
+
+// 清空背景目录中 keep 之外的文件（换图与清除共用；目录内其它文件删除失败不阻断流程）
+function bgRemoveOthers(dir, keep) {
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch { return; }
+  for (const n of names) {
+    if (n === keep) continue;
+    try { fs.unlinkSync(path.join(dir, n)); } catch { /* 保留不可删除的文件 */ }
+  }
+}
+
+function resolveBackground(context, webview) {
+  const cfg = vscode.workspace.getConfiguration('deepseek-usage-monitor');
+  const color = sanitizeBgValue(cfg.get('dashboard.backgroundColor', ''));
+  let dim = Number(cfg.get('dashboard.backgroundDim', BG_DIM_DEFAULT));
+  if (!Number.isFinite(dim)) dim = BG_DIM_DEFAULT;
+  dim = Math.round(Math.max(0, Math.min(BG_DIM_MAX, dim)) * 100) / 100;
+  let cardOpacity = Number(cfg.get('dashboard.cardOpacity', BG_CARD_OPACITY_DEFAULT));
+  if (!Number.isFinite(cardOpacity)) cardOpacity = BG_CARD_OPACITY_DEFAULT;
+  cardOpacity = Math.round(Math.max(BG_CARD_OPACITY_MIN, Math.min(1, cardOpacity)) * 100) / 100;
+  const file = bgImagePath(context);
+  const image = file && webview ? String(webview.asWebviewUri(vscode.Uri.file(file))) : '';
+  if (image) console.log('[DeepSeek Usage Monitor] background image:', path.basename(file));
+  return { color, image, dim, cardOpacity };
+}
+
+// ============================================================
+//  Chart Colors
+// ============================================================
+//
+// 三种配色方式：官方色阶 / 按模型名指定 / 单主色自动阶梯，设定值存储于 globalState（与时间窗口、背景图一致）
+// 颜色会进入面板的 style 属性与 canvas fillStyle，因此仍按 #RGB[A] / #RRGGBB[AA] 校验后使用
+// 模型名到颜色的最终映射只在宿主计算（chartColorMap），面板查表，避免重复计算
+
+const CHART_COLOR_MODES = ['official', 'model', 'mono'];
+const CHART_STATE_KEYS = {
+  mode: 'deepseekUsage.chartColorMode',
+  modelColors: 'deepseekUsage.chartModelColors',
+  baseColor: 'deepseekUsage.chartBaseColor',
+};
+const CHART_COLOR_DEFAULT = '#FFAA00';   // 官方色阶首色，同时作为单主色模式的默认主色
+const OFFICIAL_COST_COLORS = ['#FFAA00', '#FF8800', '#FF5500', '#FFCC66', '#CC4400', '#994400'];
+
+function sanitizeChartColor(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  return /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(s) ? s : '';
+}
+
+// hex → [hue, saturation, lightness]，无法解析返回 null
+function hexToHsl(hex) {
+  const s = sanitizeChartColor(hex);
+  if (!s) return null;
+  const h = s.slice(1);
+  let r, g, b;
+  if (h.length === 3 || h.length === 4) {
+    r = parseInt(h[0] + h[0], 16); g = parseInt(h[1] + h[1], 16); b = parseInt(h[2] + h[2], 16);
+  } else {
+    r = parseInt(h.slice(0, 2), 16); g = parseInt(h.slice(2, 4), 16); b = parseInt(h.slice(4, 6), 16);
+  }
+  const R = r / 255, G = g / 255, B = b / 255;
+  const max = Math.max(R, G, B), min = Math.min(R, G, B), d = max - min;
+  const l = (max + min) / 2;
+  if (d === 0) return [0, 0, l];
+  let hue = max === R ? ((G - B) / d) % 6 : (max === G ? (B - R) / d + 2 : (R - G) / d + 4);
+  hue *= 60;
+  if (hue < 0) hue += 360;
+  return [hue, d / (1 - Math.abs(2 * l - 1)), l];
+}
+
+function hslToHex(h, s, l) {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  let r = 0, g = 0, b = 0;
+  if (h < 60) { r = c; g = x; } else if (h < 120) { r = x; g = c; }
+  else if (h < 180) { g = c; b = x; } else if (h < 240) { g = x; b = c; }
+  else if (h < 300) { r = x; b = c; } else { r = c; b = x; }
+  const to = (v) => Math.round((v + m) * 255).toString(16).padStart(2, '0');
+  return '#' + to(r) + to(g) + to(b);
+}
+
+// 单主色阶梯：保持色相与饱和度，按模型数量在明度上均匀铺开（与官方色阶同向：越靠后越深）
+function colorLadder(base, count) {
+  const hsl = hexToHsl(base);
+  if (!hsl || !(count > 0)) return [];
+  const l1 = Math.min(0.78, hsl[2] + 0.16);
+  const l2 = Math.max(0.22, hsl[2] - 0.24);
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const t = count === 1 ? 0.3 : i / (count - 1);
+    out.push(hslToHex(hsl[0], hsl[1], l1 + (l2 - l1) * t));
+  }
+  return out;
+}
+
+function resolveChartConfig(context) {
+  const gs = context.globalState;
+  const modeRaw = String(gs.get(CHART_STATE_KEYS.mode, '') || '');
+  const mode = CHART_COLOR_MODES.indexOf(modeRaw) >= 0 ? modeRaw : 'official';
+  const rawMap = gs.get(CHART_STATE_KEYS.modelColors, {});
+  const modelColors = {};
+  if (rawMap && typeof rawMap === 'object') {
+    for (const key of Object.keys(rawMap)) {
+      const c = sanitizeChartColor(rawMap[key]);
+      if (c) modelColors[String(key)] = c;
+    }
+  }
+  return { mode, modelColors, baseColor: sanitizeChartColor(gs.get(CHART_STATE_KEYS.baseColor, '')) || CHART_COLOR_DEFAULT };
+}
+
+// 模型名 → 颜色。单一主色或按模型指定时未覆盖的模型回落到官方色阶
+function chartColorMap(context, models) {
+  const cfg = resolveChartConfig(context);
+  const list = Array.isArray(models) ? models : [];
+  const ladder = cfg.mode === 'mono' ? colorLadder(cfg.baseColor, list.length) : [];
+  const map = {};
+  list.forEach((name, i) => {
+    if (cfg.mode === 'model' && cfg.modelColors[name]) map[name] = cfg.modelColors[name];
+    else if (cfg.mode === 'mono' && ladder[i]) map[name] = ladder[i];
+    else map[name] = OFFICIAL_COST_COLORS[i % OFFICIAL_COST_COLORS.length];
+  });
+  return map;
+}
+
+// ============================================================
+//  Config Export / Import
+// ============================================================
+//
+// 导出「外观与行为」：设置里除凭证外的项 + 面板状态（时间窗口、图表配色）
+// sessionToken、cookie 与 API Key（SecretStorage）以及背景图文件不内嵌
+// 读取是纯数据路径：按白名单逐项校验，未识别的键与非法值一律跳过并汇报
+// 因此他人配置文件不能借导入写入任意设置（例如把 proxy 指向别处）
+
+const CONFIG_FILE_APP = 'deepseek-usage-monitor';
+const CONFIG_FILE_VERSION = 1;
+const CONFIG_SETTING_KEYS = [
+  'language', 'statusBar.items', 'refreshInterval',
+  'dashboard.backgroundColor', 'dashboard.backgroundDim',
+];
+const CONFIG_STATE_KEYS = [PRESET_STATE_KEY, CHART_STATE_KEYS.mode, CHART_STATE_KEYS.modelColors, CHART_STATE_KEYS.baseColor];
+const SB_ITEM_IDS = ['todayCost', 'monthCost', 'balance', 'todayTokens'];
+const CONFIG_NOT_EXPORTED = [
+  'deepseek-usage-monitor.sessionToken',
+  'deepseek-usage-monitor.cookie',
+  'API Key (SecretStorage)',
+  'background image file',
+];
+
+// 设置项白名单校验：返回 undefined 表示不可导入
+function sanitizeConfigSetting(shortKey, value) {
+  switch (shortKey) {
+    case 'language':
+      return (value === 'en' || value === 'zh-cn') ? value : undefined;
+    case 'statusBar.items': {
+      if (!Array.isArray(value)) return undefined;
+      return Array.from(new Set(value.filter((v) => SB_ITEM_IDS.indexOf(v) >= 0)));
+    }
+    case 'refreshInterval': {
+      const n = Number(value);
+      return Number.isFinite(n) && n >= 0 && n <= 1440 ? n : undefined;
+    }
+    case 'dashboard.backgroundColor': {
+      const s = sanitizeBgValue(value);
+      return (s === '' && String(value == null ? '' : value).trim() === '') ? '' : (s || undefined);
+    }
+    case 'dashboard.backgroundDim': {
+      const n = Number(value);
+      return Number.isFinite(n) && n >= 0 && n <= BG_DIM_MAX ? Math.round(n * 100) / 100 : undefined;
+    }
+    default:
+      return undefined;
+  }
+}
+
+function sanitizeConfigState(key, value) {
+  if (key === PRESET_STATE_KEY) return isPreset(String(value || '')) ? String(value) : undefined;
+  if (key === CHART_STATE_KEYS.mode) return CHART_COLOR_MODES.indexOf(String(value)) >= 0 ? String(value) : undefined;
+  if (key === CHART_STATE_KEYS.baseColor) return sanitizeChartColor(value) || undefined;
+  if (key === CHART_STATE_KEYS.modelColors) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const out = {};
+    for (const k of Object.keys(value)) {
+      const c = sanitizeChartColor(value[k]);
+      if (c) out[String(k)] = c;
+    }
+    return out;
+  }
+  return undefined;
+}
+
+// ============================================================
 //  Webview HTML Generator — Canvas Charts Dashboard
 // ============================================================
 //
 // 数据不再拼进 HTML，只有面板创建和语言变化时才重建外壳，其余一律通过 postMessage 推送数据
 
 
-function buildPanelHtml(i18n, langCode, selectedPreset) {
+function buildPanelHtml(i18n, langCode, selectedPreset, bg) {
   const rangeOpts = RANGE_PRESET_DEFS
     .map((d) => `<option value="${d.id}"${d.id === selectedPreset ? ' selected' : ''}>${i18n[d.key]}</option>`).join('');
   const rangeIds = JSON.stringify(RANGE_PRESET_DEFS.map((d) => d.id));
   const htmlLang = langCode === 'en' ? 'en' : 'zh-CN';   // <html lang> 跟随语言设置
+
+  // 背景规则统一追加在 style 末尾：同特异性下后者生效，用于覆盖上面的 body 与 .card 底色
+  const bgImage = bg && bg.image ? String(bg.image) : '';
+  const bgColor = bg && bg.color ? String(bg.color) : '';
+  const bgDim = bg && Number.isFinite(bg.dim) ? bg.dim : BG_DIM_DEFAULT;
+  const bgRules = [];
+  if (bgImage) {
+    // 图片层与暗化层用 fixed 伪元素铺满视口；z-index 为负，位于内容之下
+    bgRules.push(
+      'body{background:transparent}',
+      `body::before{content:'';position:fixed;inset:0;z-index:-2;background-image:url("${bgImage}");background-size:cover;background-position:center;background-repeat:no-repeat}`,
+      `body::after{content:'';position:fixed;inset:0;z-index:-1;background:rgba(0,0,0,${bgDim})}`,
+      `body.vscode-light::after{background:rgba(255,255,255,${bgDim})}`,
+    );
+  } else if (bgColor) {
+    bgRules.push(`body{background:${bgColor}}`);
+  }
+  if (bgImage || bgColor) {
+    // 卡片转半透明让背景透出，透明度可配；高对比度主题不覆盖 --ds-card-bg，保持不透明。
+    // 浅色主题比深色略高一点（默认 0.82 → 0.88），白底上文字对比度更稳
+    const op = bg && Number.isFinite(bg.cardOpacity) ? bg.cardOpacity : BG_CARD_OPACITY_DEFAULT;
+    const opLight = Math.round(Math.min(1, op + 0.06) * 100) / 100;
+    bgRules.push(
+      `body.vscode-dark{--ds-card-bg:rgba(30,32,36,${op})}`,
+      `body.vscode-light{--ds-card-bg:rgba(255,255,255,${opLight})}`,
+    );
+  }
+  const bgCss = bgRules.length ? '\n/* dashboard background */\n' + bgRules.join('\n') + '\n' : '';
 
   return `<!DOCTYPE html><html lang="${htmlLang}">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
@@ -522,25 +861,26 @@ function buildPanelHtml(i18n, langCode, selectedPreset) {
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--vscode-editor-background);color:var(--vscode-editor-foreground);padding:20px 24px;font-size:13px}
 h1{font-size:18px;font-weight:600}
-.subtitle{font-size:11px;color:var(--vscode-descriptionForeground);margin-top:4px;margin-bottom:16px}
+.subtitle{font-size:11px;color:var(--vscode-editor-foreground);margin-top:4px;margin-bottom:16px}
 .banner{margin-bottom:12px;padding:8px 12px;border-radius:6px;font-size:12px;background:var(--vscode-inputValidation-errorBackground,rgba(241,76,76,.12));border:1px solid var(--vscode-inputValidation-errorBorder,#f14c4c)}
 .banner[hidden]{display:none}
 .border{--card-border:var(--vscode-widget-border,rgba(128,128,128,.25))}
 .cards-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
 .cards-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
-.card{background:var(--vscode-editorWidget-background,var(--vscode-input-background));border:1px solid var(--vscode-widget-border,rgba(128,128,128,.25));border-radius:6px;padding:14px 16px;min-width:0}
+.card{background:var(--ds-card-bg,var(--vscode-editorWidget-background,var(--vscode-input-background)));border:1px solid var(--vscode-widget-border,rgba(128,128,128,.25));border-radius:6px;padding:14px 16px;min-width:0}
 .card-row{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
-.card .label{font-size:11px;color:var(--vscode-descriptionForeground);margin-bottom:6px}
+.card .label{font-size:11px;color:var(--vscode-editor-foreground);margin-bottom:6px}
 .card .value{display:inline-block;font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
 .card .suffix{font-size:11px;color:var(--vscode-descriptionForeground);margin-left:6px}
 .card .suffix[hidden]{display:none}
-.card .sub{font-size:11px;color:var(--vscode-descriptionForeground);margin-top:4px;min-height:14px}
+.card .sub{font-size:11px;color:var(--vscode-descriptionForeground);margin-top:4px}
+.card .sub[hidden]{display:none}
 .divider{border:none;border-top:1px solid var(--vscode-widget-border,rgba(128,128,128,.25));margin:18px 0 16px}
 .toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}
 .toolbar-l{display:flex;align-items:center;gap:8px}
-.toolbar-label{font-size:12px;color:var(--vscode-descriptionForeground)}
+.toolbar-label{font-size:12px;color:var(--vscode-editor-foreground)}
 .toolbar-r{display:flex;align-items:center;gap:10px}
-.updated-at{font-size:11px;color:var(--vscode-descriptionForeground);white-space:nowrap}
+.updated-at{font-size:11px;color:var(--vscode-editor-foreground);white-space:nowrap}
 .range-select{padding:5px 10px;background:var(--vscode-input-background);color:var(--vscode-editor-foreground);border:1px solid var(--vscode-widget-border,rgba(128,128,128,.25));border-radius:4px;font-size:13px;cursor:pointer}
 .btn{padding:5px 14px;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:500}
 .btn-primary{background:var(--vscode-button-background);color:var(--vscode-button-foreground)}
@@ -557,21 +897,32 @@ h1{font-size:18px;font-weight:600}
 .chart-wrap canvas{display:block;width:100%}
 #toast{position:fixed;top:10px;right:20px;z-index:999;padding:8px 16px;border-radius:4px;font-size:12px;background:var(--vscode-button-background);color:var(--vscode-button-foreground);box-shadow:0 2px 8px rgba(0,0,0,.3);transform:translateY(-100px);transition:transform .2s;pointer-events:none}
 #toast.show{transform:translateY(0)}
-#chart-tip{position:fixed;pointer-events:none;z-index:998;background:var(--vscode-editorWidget-background,var(--vscode-input-background));color:var(--vscode-editor-foreground);border:1px solid var(--vscode-widget-border,rgba(128,128,128,.25));border-radius:6px;padding:10px 14px;font-size:11px;line-height:1.6;box-shadow:0 4px 12px rgba(0,0,0,.3);opacity:0;transition:opacity .15s;max-width:300px}
+#chart-tip{position:fixed;pointer-events:none;z-index:998;background:var(--ds-card-bg,var(--vscode-editorWidget-background,var(--vscode-input-background)));color:var(--vscode-editor-foreground);border:1px solid var(--vscode-widget-border,rgba(128,128,128,.25));border-radius:6px;padding:10px 14px;font-size:11px;line-height:1.6;box-shadow:0 4px 12px rgba(0,0,0,.3);opacity:0;transition:opacity .15s;max-width:300px}
 #chart-tip.show{opacity:1}
 #chart-tip .tip-row{display:flex;justify-content:space-between;gap:18px;white-space:nowrap}
 #chart-tip .tip-row span:last-child{font-variant-numeric:tabular-nums}
 #chart-tip .tip-head{font-weight:600;padding-bottom:5px;margin-bottom:5px;border-bottom:1px solid var(--vscode-widget-border,rgba(128,128,128,.25))}
 #chart-tip .tip-dot{display:inline-block;width:7px;height:7px;border-radius:2px;margin-right:6px;vertical-align:middle}
+.chart-card{position:relative}
+.chart-card .card-head{padding-right:78px}   /* 给右上角的「配色」按钮让位，图例不会压到它 */
+.chart-card #colorBtn{position:absolute;top:12px;right:14px}
+.color-panel{position:fixed;z-index:997;right:24px;top:56px;width:252px;padding:12px 14px;border-radius:6px;background:var(--ds-card-bg,var(--vscode-editorWidget-background,var(--vscode-input-background)));border:1px solid var(--vscode-widget-border,rgba(128,128,128,.25));box-shadow:0 6px 18px rgba(0,0,0,.35)}
+.color-panel[hidden]{display:none}
+.cp-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+.cp-title{font-size:12px;font-weight:600}
+.cp-close{padding:0 4px;border:none;background:none;color:var(--vscode-descriptionForeground);cursor:pointer;font-size:12px;line-height:1}
+.cp-close:hover{color:var(--vscode-editor-foreground)}
+.cp-row{display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:6px}
+.cp-row input[type=color]{width:30px;height:20px;padding:0;border:1px solid var(--vscode-widget-border,rgba(128,128,128,.25));border-radius:3px;background:none;cursor:pointer}
+.cp-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .head-actions{display:flex;align-items:center;gap:8px}
-</style></head>
+${bgCss}</style></head>
 <body><div id="toast"></div><div id="chart-tip"></div>
 
 <div class="panel-head">
   <h1>${i18n.usageTitle}</h1>
   <div class="head-actions">
-    <button class="btn btn-light" id="setApiKeyBtn">${i18n.setApiKey}</button>
     <button class="btn btn-light" id="settingsBtn">${i18n.settings}</button>
   </div>
 </div>
@@ -623,13 +974,16 @@ h1{font-size:18px;font-weight:600}
   </div>
 </div>
 
-<div class="card" style="margin-top:12px">
+<div class="card chart-card" style="margin-top:12px">
   <div class="card-head">
     <div class="chart-title">${i18n.costCny}<span class="chart-total" id="chartTotal"></span></div>
     <div class="legend" id="costLegend"></div>
   </div>
   <div class="chart-wrap" id="costWrap"><canvas id="costChart" style="width:100%;height:260px"></canvas></div>
+  <button class="btn btn-light" id="colorBtn">${i18n.chartColorsBtn}</button>
 </div>
+
+<div class="color-panel" id="colorPanel" hidden></div>
 
 <script>
 (function() {
@@ -640,8 +994,8 @@ var RANGE_IDS = ${rangeIds};
 var D = null;                 // 最近一次由扩展推送的数据
 var busySafety = null;        // 刷新按钮的兜底解锁计时器
 
-// 官方「消费金额」柱状图色阶（截图像素采样）；按 models 下标分配，超出后追加备用色
-var COST_COLORS = ['#FFAA00', '#FF8800', '#FF5500', '#FFCC66', '#CC4400', '#994400'];
+// 官方「消费金额」柱状图色阶（截图像素采样），由宿主注入；用于 D.colors 未覆盖的模型
+var COST_COLORS = ${JSON.stringify(OFFICIAL_COST_COLORS)};
 
 function i18n() { return (D && D.i18n) || I18N || {}; }
 function fmtCost(n) { return (parseFloat(n) || 0).toFixed(2); }
@@ -661,9 +1015,67 @@ function fmtClock8(ms, short) {
 function modelOrder() { return ((D && D.models) || []).map(function(m) { return m.model; }); }
 // 颜色必须由「模型在全局 models 中的序号」决定，不能由当日在 parts 里的下标决定，
 // 否则某天只有 model2、另一天只有 model1 时两者会同色
+// 颜色由宿主按配色设置算好（D.colors，已校验为 #hex）；缺失时回落官方色阶，避免出现 undefined
 function colorOf(model) {
+  var map = (D && D.colors) || {};
+  if (map[model]) return map[model];
   var i = modelOrder().indexOf(model);
   return COST_COLORS[(i >= 0 ? i : COST_COLORS.length - 1) % COST_COLORS.length];
+}
+
+// 配色设置：宿主已校验并算好最终颜色，这里只读
+function chartCfg() { return (D && D.chart) || { mode: 'official', modelColors: {}, baseColor: COST_COLORS[0] }; }
+
+// input[type=color] 只接受 #rrggbb；把 3/4 位简写补全，带 alpha 的丢掉 alpha
+function toColorInput(v) {
+  var s = String(v || '');
+  if (/^#[0-9a-f]{3}$/i.test(s)) return '#' + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+  if (/^#[0-9a-f]{4}$/i.test(s)) return '#' + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+  if (/^#[0-9a-f]{8}$/i.test(s)) return s.slice(0, 7);
+  return /^#[0-9a-f]{6}$/i.test(s) ? s : COST_COLORS[0];
+}
+
+// 配色浮层：模式三选 +（按模型指定时）每个模型一个取色器 + 主色 + 恢复官方。
+// 元素逐个 createElement 并绑事件（面板无 CSP nonce，不使用内联 onclick）
+function renderColorPanel() {
+  var el = document.getElementById('colorPanel'); if (!el) return;
+  var L = i18n(), cfg = chartCfg();
+  el.innerHTML = '';
+
+  var head = document.createElement('div'); head.className = 'cp-head';
+  var title = document.createElement('div');
+  title.className = 'cp-title'; title.textContent = L.colorModeLabel;
+  var close = document.createElement('button');
+  close.className = 'cp-close'; close.textContent = '✕'; close.title = L.colorClose;
+  close.addEventListener('click', function() { el.hidden = true; });
+  head.appendChild(title); head.appendChild(close); el.appendChild(head);
+
+  [['official', L.colorModeOfficial], ['model', L.colorModeModel], ['mono', L.colorModeMono]].forEach(function(m) {
+    var row = document.createElement('label'); row.className = 'cp-row';
+    var radio = document.createElement('input');
+    radio.type = 'radio'; radio.name = 'cpMode'; radio.value = m[0]; radio.checked = cfg.mode === m[0];
+    radio.addEventListener('change', function() { if (radio.checked) post('setChartColors', { mode: m[0] }); });
+    var name = document.createElement('span'); name.textContent = m[1];
+    row.appendChild(radio); row.appendChild(name); el.appendChild(row);
+  });
+
+  if (cfg.mode === 'model') {
+    modelOrder().forEach(function(model) {
+      var row = document.createElement('label'); row.className = 'cp-row';
+      var picker = document.createElement('input');
+      picker.type = 'color'; picker.className = 'cp-color'; picker.value = toColorInput(colorOf(model));
+      picker.addEventListener('change', function() { post('setChartColors', { model: model, color: picker.value }); });
+      var name = document.createElement('span'); name.className = 'cp-name'; name.textContent = model;
+      row.appendChild(picker); row.appendChild(name); el.appendChild(row);
+    });
+  } else if (cfg.mode === 'mono') {
+    var row2 = document.createElement('label'); row2.className = 'cp-row';
+    var base = document.createElement('input');
+    base.type = 'color'; base.value = toColorInput(cfg.baseColor);
+    base.addEventListener('change', function() { post('setChartColors', { color: base.value }); });
+    var baseName = document.createElement('span'); baseName.textContent = L.colorBaseLabel;
+    row2.appendChild(base); row2.appendChild(baseName); el.appendChild(row2);
+  }
 }
 
 // Toast
@@ -835,19 +1247,22 @@ function render() {
     if (d.bal.granted > 0) subs.push(L.granted + ': ¥' + fmtCost(d.bal.granted));
     if (d.bal.insufficient) subs.push(L.balanceInsufficient);
     if (d.keyDegraded) subs.push(L.keySessionOnly);
-    setText('topupSub', subs.join(' · '));
+    setText('topupSub', subs.join(' · '));          // 无内容时不占位（见 .sub[hidden]）
+    show('topupSub', subs.length > 0);
   } else {
     setText('topupValue', '—'); show('topupSuffix', false);
     setText('topupSub', d.keyDegraded ? (L.errNoApiKey + ' · ' + L.keySessionOnly) : L.errNoApiKey);
+    show('topupSub', true);
   }
 
   // 卡B：今日消费（始终表示今天，与图表所选窗口无关）
   if (d.hasToday) {
     setText('todayValue', '¥' + fmtCost(d.todayCost)); show('todaySuffix', true);
-    setText('todaySub', d.todayDate + ' · GMT+8');
+    setText('todaySub', ''); show('todaySub', false);   // 无内容时不占位
   } else {
     setText('todayValue', '—'); show('todaySuffix', false);
     setText('todaySub', !d.hasCreds ? L.noSessionToken : L.loadFailed);
+    show('todaySub', true);
   }
 
   // 三张指标卡
@@ -905,6 +1320,8 @@ function armBusySafety() {
 function applyData(payload) {
   D = payload || {}; if (!D.i18n) D.i18n = I18N;
   render(); syncRanges(); drawChart();
+  var cp = document.getElementById('colorPanel');
+  if (cp && !cp.hidden) renderColorPanel();   // 浮层打开时跟随最新配色刷新
   setBusy(!!D.busy);
   if (!D.busy && busySafety) { clearTimeout(busySafety); busySafety = null; }
 }
@@ -931,11 +1348,19 @@ function onRangeChange() {
 // ---- CSP-safe event binding (no inline onclick/onchange) ----
 document.getElementById('refreshBtn').addEventListener('click', doRefresh);
 document.getElementById('rangeSelect').addEventListener('change', onRangeChange);
-document.getElementById('setApiKeyBtn').addEventListener('click', function() {
-  post('setApiKey');
+document.getElementById('colorBtn').addEventListener('click', function() {
+  var el = document.getElementById('colorPanel'); if (!el) return;
+  if (el.hidden) {
+    renderColorPanel();
+    // 浮层贴着按钮展开（按钮在图表卡右上角，位置随窗口宽度变化）
+    var r = this.getBoundingClientRect();
+    el.style.top = Math.round(r.bottom + 6) + 'px';
+    el.style.right = Math.max(12, Math.round(window.innerWidth - r.right)) + 'px';
+    el.hidden = false;
+  } else { el.hidden = true; }
 });
 document.getElementById('settingsBtn').addEventListener('click', function() {
-  post('openSettings');
+  post('openMenu');   // 入口菜单在宿主侧用 QuickPick 展开
 });
 
 // ---- ResizeObserver: 面板尺寸变化时重绘图表 ----
@@ -1087,21 +1512,21 @@ async function activate(context) {
     const lastOf = (agg) => (agg && agg.bars.length ? agg.bars[agg.bars.length - 1] : null);
     if (monthAgg) {
       const bar = lastOf(monthAgg);   // 本月窗口的最后一根即今天
-      return { totalCost: monthAgg.totalCost, todayCost: bar ? bar.cost : 0, todayTokens: bar ? bar.tokens : 0, todayDate };
+      return { totalCost: monthAgg.totalCost, todayCost: bar ? bar.cost : 0, todayTokens: bar ? bar.tokens : 0 };
     }
     if (!windowAgg) return null;
     if (coversMonthToDate(spec, now)) {
       const bar = lastOf(windowAgg);
-      return { totalCost: windowAgg.totalCost, todayCost: bar ? bar.cost : 0, todayTokens: bar ? bar.tokens : 0, todayDate };
+      return { totalCost: windowAgg.totalCost, todayCost: bar ? bar.cost : 0, todayTokens: bar ? bar.tokens : 0 };
     }
     if (spec.id === 'today') {
-      return { totalCost: null, todayCost: windowAgg.totalCost, todayTokens: windowAgg.totalTokens, todayDate };
+      return { totalCost: null, todayCost: windowAgg.totalCost, todayTokens: windowAgg.totalTokens };
     }
     if (spec.granularity === 'day') {
       const bar = lastOf(windowAgg);
-      if (bar && bar.date === todayDate) return { totalCost: null, todayCost: bar.cost, todayTokens: bar.tokens, todayDate };
+      if (bar && bar.date === todayDate) return { totalCost: null, todayCost: bar.cost, todayTokens: bar.tokens };
     }
-    return { totalCost: null, todayCost: null, todayTokens: null, todayDate };
+    return { totalCost: null, todayCost: null, todayTokens: null };
   }
 
   async function refreshAllData(presetId, nowMs) {
@@ -1234,10 +1659,12 @@ async function activate(context) {
       hasCreds,                                     // 区分"没配凭证"与"拉取失败"
       hasUsage: !!usage,
       models: usage ? usage.models : [], bars: usage ? usage.bars : [],
+      chart: resolveChartConfig(context),                                        // 面板配色控件用（模式/主色/按模型覆盖）
+      colors: chartColorMap(context, usage ? usage.models.map((m) => m.model) : []), // 已解析的最终颜色，面板只查表
       totalCost: usage ? usage.totalCost : 0, totalTokens: usage ? usage.totalTokens : 0, totalReqs: usage ? usage.totalReqs : 0,
       monthCost: month ? month.totalCost : null,    // 与窗口无关
       hasToday: !!(month && month.todayCost != null),
-      todayDate: month ? month.todayDate : '', todayCost: month ? month.todayCost : null, todayTokens: month ? month.todayTokens : null,
+      todayCost: month ? month.todayCost : null, todayTokens: month ? month.todayTokens : null,
     };
   }
 
@@ -1251,7 +1678,7 @@ async function activate(context) {
     if (!currentPanel) return;
     panelReady = false;
     panelLang = langKey();
-    currentPanel.webview.html = buildPanelHtml(t(), langKey(), currentPreset);
+    currentPanel.webview.html = buildPanelHtml(t(), langKey(), currentPreset, resolveBackground(context, currentPanel.webview));
   }
 
   function openUsagePanel() {
@@ -1260,10 +1687,15 @@ async function activate(context) {
       if (panelLang !== langKey()) rebuildShell(); else pushData();
       return;
     }
-    currentPanel = vscode.window.createWebviewPanel('deepseekUsage', t().title, vscode.ViewColumn.Two, { enableScripts: true, retainContextWhenHidden: true });
+    // 背景图目录先落盘：localResourceRoots 指向它，面板只允许加载该目录内的资源
+    try { fs.mkdirSync(bgDirPath(context), { recursive: true }); } catch (e) { /* 目录创建失败时面板按无背景渲染 */ }
+    currentPanel = vscode.window.createWebviewPanel('deepseekUsage', t().title, vscode.ViewColumn.Two, {
+      enableScripts: true, retainContextWhenHidden: true,
+      localResourceRoots: [vscode.Uri.file(bgDirPath(context))],
+    });
     panelReady = false; panelLang = langKey();
-    // 外壳只在这里（以及语言变化时）设置一次
-    currentPanel.webview.html = buildPanelHtml(t(), langKey(), currentPreset);
+    // 外壳只在这里（以及语言/背景变化时）设置一次
+    currentPanel.webview.html = buildPanelHtml(t(), langKey(), currentPreset, resolveBackground(context, currentPanel.webview));
 
     currentPanel.webview.onDidReceiveMessage(async (msg) => {
       try {
@@ -1280,11 +1712,10 @@ async function activate(context) {
           currentPreset = id;                          // 选择即状态：不因拉取失败回滚
           savePreset(id);
           await refresh(id, 'range');                  // 失败也不弹窗，错误经面板横条呈现
-        } else if (msg.type === 'setApiKey') {
-          await promptApiKeyFlow();
-        } else if (msg.type === 'openSettings') {
-          // @ext:<id> 让设置页只显示本扩展的配置项；用运行时 id 以兼容任意 publisher
-          vscode.commands.executeCommand('workbench.action.openSettings', '@ext:' + context.extension.id);
+        } else if (msg.type === 'openMenu') {
+          await promptMainMenu();                  // 面板唯一入口：菜单里再分发到各流程
+        } else if (msg.type === 'setChartColors') {
+          await applyChartColors(msg);             // 只改渲染，不重取数据
         }
       } catch (e) {
         vscode.window.showErrorMessage(tf('genericError', e.message || e));
@@ -1330,15 +1761,264 @@ async function activate(context) {
     }
   }
 
+  // ---- Dashboard background ----
+  // 图片复制进 globalStorage/background 后经 asWebviewUri 加载：localResourceRoots 只需该目录，
+  // 原文件被移动或删除不影响已设置的背景，也不读取用户路径之外的资源
+  async function setDashboardBackground() {
+    let picked;
+    try {
+      picked = await vscode.window.showOpenDialog({
+        canSelectMany: false,
+        openLabel: t().bgPickTitle,
+        filters: { Images: ['png', 'jpg', 'jpeg', 'webp', 'gif'] },
+      });
+    } catch (e) { picked = undefined; }
+    if (!picked || !picked.length) return;
+
+    let srcPath = String(picked[0].fsPath || '');
+    if (!fs.existsSync(srcPath)) {
+      // 远程窗口中对话框浏览的是客户端文件系统，宿主侧无此文件：改为输入宿主侧路径
+      const typed = await vscode.window.showInputBox({ prompt: t().bgPathPrompt, value: srcPath, ignoreFocusOut: true });
+      if (typed === undefined) return;
+      srcPath = typed.trim();
+      if (!srcPath) return;
+      if (!fs.existsSync(srcPath)) { vscode.window.showErrorMessage(tf('bgFileMissing', srcPath)); return; }
+    }
+
+    const ext = path.extname(srcPath).toLowerCase();
+    if (BG_EXT_LIST.indexOf(ext) < 0) { vscode.window.showWarningMessage(tf('bgBadFormat', BG_EXT_LIST.join(' '))); return; }
+
+    let size = 0;
+    try {
+      const st = fs.statSync(srcPath);
+      if (!st.isFile()) throw new Error('not a regular file');
+      size = st.size;
+    } catch (e) { vscode.window.showErrorMessage(tf('bgFileMissing', srcPath)); return; }
+    if (size > BG_MAX_BYTES) {
+      vscode.window.showWarningMessage(tf('bgTooLarge', (size / 1048576).toFixed(1), String(BG_MAX_BYTES / 1048576)));
+      return;
+    }
+
+    // 存储名 = 基名 + 内容哈希：webview 按 URL 缓存资源，URL 必须随内容变化，
+    // 否则更换同名图片会继续显示旧图
+    let hash = '';
+    try { hash = crypto.createHash('sha256').update(fs.readFileSync(srcPath)).digest('hex').slice(0, 8); }
+    catch (e) { hash = Date.now().toString(16).slice(-8); }   // 读取失败时退化为时间戳，URL 仍随每次设置变化
+    const raw = bgSafeName(srcPath);
+    const stem = Array.from(!raw || raw.lastIndexOf('.') <= 0 ? 'background' : raw.slice(0, raw.lastIndexOf('.')))
+      .slice(0, 60).join('');                                 // 60 + 1 + 8 + 后缀，落在 80 字上限内
+    const name = stem + '-' + hash + ext;
+    try {
+      const dir = bgDirPath(context);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.copyFileSync(srcPath, path.join(dir, name));
+      bgRemoveOthers(dir, name);
+    } catch (e) {
+      vscode.window.showErrorMessage(tf('genericError', e.message || e));
+      return;
+    }
+    await context.globalState.update(BG_IMAGE_KEY, name);
+    await context.globalState.update(BG_LABEL_KEY, path.basename(srcPath));
+    rebuildShell();
+    vscode.window.showInformationMessage(t().bgSet);
+  }
+
+  async function clearDashboardBackground() {
+    try { bgRemoveOthers(bgDirPath(context), ''); } catch (e) { /* globalStorage 不可用时仍清除状态，避免面板指向已失效的图片 */ }
+    await context.globalState.update(BG_IMAGE_KEY, '');
+    await context.globalState.update(BG_LABEL_KEY, '');
+    rebuildShell();
+    vscode.window.showInformationMessage(t().bgCleared);
+  }
+
+  // 面板「设置背景图」按钮：先选操作再执行。命令面板的两个命令保持直达，不加这一层。
+  async function promptBackgroundAction() {
+    const current = bgImagePath(context);
+    const label = String(context.globalState.get(BG_LABEL_KEY, '') || '');
+    const items = [
+      { id: 'change', label: t().bgChangeOption, description: current ? tf('bgCurrentFile', label || path.basename(current)) : t().bgNoneSet },
+      { id: 'clear', label: t().bgClearOption },
+    ];
+    const picked = await vscode.window.showQuickPick(items, { placeHolder: t().bgPickActionTitle, ignoreFocusOut: true });
+    if (!picked) return;
+    if (picked.id === 'change') await setDashboardBackground();
+    else if (picked.id === 'clear') await clearDashboardBackground();
+  }
+
+  // ---- Chart colors ----
+  // 面板配色控件写回 globalState。只影响渲染：不重建外壳、不重取数据。
+  // 指定单个模型的颜色即隐含切到「按模型指定」，否则界面上看不到变化。
+  async function applyChartColors(msg) {
+    const gs = context.globalState;
+    const mode = String(msg.mode || '');
+    if (CHART_COLOR_MODES.indexOf(mode) >= 0) await gs.update(CHART_STATE_KEYS.mode, mode);
+    const color = sanitizeChartColor(msg.color);
+    if (color && msg.model) {
+      const map = Object.assign({}, gs.get(CHART_STATE_KEYS.modelColors, {}) || {});
+      map[String(msg.model)] = color;
+      await gs.update(CHART_STATE_KEYS.modelColors, map);
+      if (String(gs.get(CHART_STATE_KEYS.mode, '') || '') !== 'model') await gs.update(CHART_STATE_KEYS.mode, 'model');
+    } else if (color) {
+      await gs.update(CHART_STATE_KEYS.baseColor, color);
+    }
+    pushData();
+  }
+
+  // ---- 面板入口菜单 ----
+  // 面板只保留一个「⚙ 设置」按钮：背景图、API Key、迁移配置文件都从这里进入
+  // 命令面板里的各条独立命令保持不变（两处入口共用同一批流程）
+  async function promptMainMenu() {
+    const items = [
+      { id: 'settings', label: t().menuOpenSettings },
+      { id: 'background', label: t().setBg },
+      { id: 'apiKey', label: t().setApiKey },
+      { id: 'config', label: t().menuConfigTransfer },
+    ];
+    const picked = await vscode.window.showQuickPick(items, { placeHolder: t().menuTitle, ignoreFocusOut: true });
+    if (!picked) return;
+    if (picked.id === 'settings') {
+      // @ext:<id> 让设置页只显示本扩展的配置项；用运行时 id 以兼容任意 publisher
+      await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:' + context.extension.id);
+    } else if (picked.id === 'background') {
+      await promptBackgroundAction();
+    } else if (picked.id === 'apiKey') {
+      await promptApiKeyFlow();
+    } else if (picked.id === 'config') {
+      await promptConfigTransfer();
+    }
+  }
+
+  // 导入 / 导出：与「更换 / 清空背景图」同为两级选择
+  async function promptConfigTransfer() {
+    const items = [
+      { id: 'export', label: t().menuExport },
+      { id: 'import', label: t().menuImport },
+    ];
+    const picked = await vscode.window.showQuickPick(items, { placeHolder: t().menuConfigTransfer, ignoreFocusOut: true });
+    if (!picked) return;
+    if (picked.id === 'export') await exportConfig();
+    else if (picked.id === 'import') await importConfig();
+  }
+
+  // ---- Config export / import ----
+  async function exportConfig() {
+    const settings = {};
+    for (const short of CONFIG_SETTING_KEYS) {
+      const v = config().get(short);
+      if (v !== undefined) settings['deepseek-usage-monitor.' + short] = v;
+    }
+    const state = {};
+    for (const key of CONFIG_STATE_KEYS) {
+      const v = context.globalState.get(key, undefined);
+      if (v !== undefined) state[key] = v;
+    }
+    let target;
+    try {
+      const folder = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0];
+      target = await vscode.window.showSaveDialog({
+        defaultUri: folder ? vscode.Uri.joinPath(folder.uri, 'deepseek-usage-config.json') : undefined,
+        filters: { JSON: ['json'] },
+        saveLabel: t().exportConfigTitle,
+      });
+    } catch (e) { target = undefined; }
+    if (!target) return;
+    const payload = {
+      app: CONFIG_FILE_APP,
+      version: CONFIG_FILE_VERSION,
+      exportedAt: new Date().toISOString(),
+      settings,
+      state,
+      notExported: CONFIG_NOT_EXPORTED,   // 文件自身说明范围，避免误以为含凭证
+    };
+    try {
+      fs.writeFileSync(target.fsPath, JSON.stringify(payload, null, 2) + '\n', 'utf8');
+    } catch (e) {
+      vscode.window.showErrorMessage(tf('exportFailed', e.message || e));
+      return;
+    }
+    vscode.window.showInformationMessage(tf('exportDone', path.basename(target.fsPath)));
+  }
+
+  async function importConfig() {
+    let picked;
+    try {
+      picked = await vscode.window.showOpenDialog({
+        canSelectMany: false, openLabel: t().importConfigTitle, filters: { JSON: ['json'] },
+      });
+    } catch (e) { picked = undefined; }
+    if (!picked || !picked.length) return;
+
+    const file = String(picked[0].fsPath || '');
+    let parsed;
+    try {
+      parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (e) {
+      vscode.window.showErrorMessage(e && e.code ? tf('importReadFailed', e.message || e) : t().importBadFile);
+      return;
+    }
+    if (!parsed || typeof parsed !== 'object' || parsed.app !== CONFIG_FILE_APP) {
+      vscode.window.showErrorMessage(t().importBadFile);
+      return;
+    }
+    const ver = Number(parsed.version);
+    if (!Number.isFinite(ver) || ver < 1) { vscode.window.showErrorMessage(t().importBadFile); return; }
+    if (ver > CONFIG_FILE_VERSION) {
+      vscode.window.showErrorMessage(tf('importBadVersion', ver, CONFIG_FILE_VERSION));
+      return;
+    }
+
+    const prefix = 'deepseek-usage-monitor.';
+    const apply = {}; const stateApply = {}; const skipped = [];
+    const rawSettings = (parsed.settings && typeof parsed.settings === 'object') ? parsed.settings : {};
+    for (const fullKey of Object.keys(rawSettings)) {
+      const short = fullKey.indexOf(prefix) === 0 ? fullKey.slice(prefix.length) : '';
+      // 凭证（sessionToken/cookie）、proxy 与未知键都在这里被block：白名单之外不写入
+      if (!short || CONFIG_SETTING_KEYS.indexOf(short) < 0) { skipped.push(fullKey); continue; }
+      const v = sanitizeConfigSetting(short, rawSettings[fullKey]);
+      if (v === undefined) { skipped.push(fullKey); continue; }
+      apply[short] = v;
+    }
+    const rawState = (parsed.state && typeof parsed.state === 'object') ? parsed.state : {};
+    for (const key of Object.keys(rawState)) {
+      if (CONFIG_STATE_KEYS.indexOf(key) < 0) { skipped.push(key); continue; }
+      const v = sanitizeConfigState(key, rawState[key]);
+      if (v === undefined) { skipped.push(key); continue; }
+      stateApply[key] = v;
+    }
+
+    const nSettings = Object.keys(apply).length;
+    const nState = Object.keys(stateApply).length;
+    if (!nSettings && !nState) { vscode.window.showWarningMessage(t().importNothing); return; }
+    const confirmed = await vscode.window.showWarningMessage(
+      tf('importConfirmMsg', nSettings, nState, skipped.length), { modal: true }, t().importConfirm);
+    if (confirmed !== t().importConfirm) return;
+
+    for (const short of Object.keys(apply)) {
+      await config().update(short, apply[short], vscode.ConfigurationTarget.Global);
+    }
+    for (const key of Object.keys(stateApply)) await context.globalState.update(key, stateApply[key]);
+    if (typeof apply.refreshInterval === 'number') startAutoRefresh();
+    if (Object.prototype.hasOwnProperty.call(stateApply, PRESET_STATE_KEY)) currentPreset = stateApply[PRESET_STATE_KEY];
+    if (currentPanel) rebuildShell();
+    refresh(undefined, 'import');
+    vscode.window.showInformationMessage(tf('importApplied', nSettings, nState));
+    if (skipped.length) vscode.window.showWarningMessage(tf('importSkipped', skipped.length, skipped.slice(0, 6).join(', ')));
+  }
+
   // ---- Commands ----
   context.subscriptions.push(
     vscode.commands.registerCommand('deepseek-usage-monitor.showUsage', () => openUsagePanel()),
     vscode.commands.registerCommand('deepseek-usage-monitor.refresh', () => refresh(undefined, 'command')),
     vscode.commands.registerCommand('deepseek-usage-monitor.setApiKey', () => promptApiKeyFlow()),
+    vscode.commands.registerCommand('deepseek-usage-monitor.setDashboardBackground', () => setDashboardBackground()),
+    vscode.commands.registerCommand('deepseek-usage-monitor.clearDashboardBackground', () => clearDashboardBackground()),
+    vscode.commands.registerCommand('deepseek-usage-monitor.exportConfig', () => exportConfig()),
+    vscode.commands.registerCommand('deepseek-usage-monitor.importConfig', () => importConfig()),
     vscode.workspace.onDidChangeConfiguration(e => {
       if (!e.affectsConfiguration('deepseek-usage-monitor')) return;
       if (e.affectsConfiguration('deepseek-usage-monitor.refreshInterval')) startAutoRefresh();
       if (e.affectsConfiguration('deepseek-usage-monitor.language') && currentPanel) rebuildShell();
+      if (e.affectsConfiguration('deepseek-usage-monitor.dashboard') && currentPanel) rebuildShell();
       refresh(undefined, 'config');
     }),
     statusBarItem
@@ -1356,4 +2036,7 @@ function deactivate() { console.log('[DeepSeek Usage Monitor] Deactivated'); }
 module.exports = { activate, deactivate, __test: {
   resolveRange, slotStartSec, visibleSlotCount, coversMonthToDate, bucketSecOf,
   aggregateUsageRange, fmtRangeLabel, RANGE_PRESET_DEFS, DEFAULT_PRESET,
+  sanitizeBgValue, bgSafeName, bgImagePath, resolveBackground, buildPanelHtml,
+  sanitizeChartColor, hexToHsl, hslToHex, colorLadder, resolveChartConfig, chartColorMap, OFFICIAL_COST_COLORS,
+  sanitizeConfigSetting, sanitizeConfigState, CONFIG_SETTING_KEYS, CONFIG_STATE_KEYS,
 } };
