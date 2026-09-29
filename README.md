@@ -11,7 +11,7 @@
 ### 1. 高度自定义
 
 - **可自定义状态栏信息显示**：底栏右侧常驻显示本日消费 / 本月消费 / 账户余额 / 本日消耗token，显示项目种类和顺序可随意配置
-  ![状态栏演示](image/README/StatusBar_zh.png)
+  <img src="image/README/StatusBar_zh.png" width="720" alt="状态栏演示">
 - **可自定义仪表盘面板背景**：图片/纯色/渐变背景随心选！图片随页面大小自动缩放，在美观的同时依旧保证信息和文字清晰可读
   <img src="image/README/Dashboard_zh.png" width="720" alt="Dashboard">
 - **可自定义配色 Official 风格柱状图**：包含三种模式：官方色阶/按模型单独指定颜色/设定单主色自动阶梯，包含取色器和RGB/HSL/HEX颜色指定模式

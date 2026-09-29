@@ -11,7 +11,7 @@ Keep an eye on your DeepSeek API balance and usage inside VSCode: a customizable
 ### 1. Highly customizable
 
 - **Customizable status bar readout**: today's cost / this month's cost / account balance / tokens used today, shown on the right side of the status bar; the items and their order are fully configurable
-  ![Status bar readout](image/README/StatusBar_en.png)
+  <img src="image/README/StatusBar_en.png" width="720" alt="Status bar readout">
 - **Customizable dashboard background**: pick an image, a solid color or a gradient; the image scales with the panel size, so it looks the way you want while keeping the information readable
   <img src="image/README/Dashboard_en.png" width="720" alt="Dashboard">
 - **Customizable colors for the official-style bar chart**: three modes — official palette / per-model colors / single base color with automatic shades — with a built-in color picker that supports RGB / HSL / HEX input
