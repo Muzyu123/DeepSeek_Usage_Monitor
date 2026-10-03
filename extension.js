@@ -759,11 +759,13 @@ function chartColorMap(context, models) {
 const CONFIG_FILE_APP = 'deepseek-usage-monitor';
 const CONFIG_FILE_VERSION = 1;
 const CONFIG_SETTING_KEYS = [
-  'language', 'statusBar.items', 'refreshInterval',
+  'language', 'statusBar.items', 'statusBar.label', 'statusBar.closeWhenActive', 'refreshInterval',
   'dashboard.backgroundColor', 'dashboard.backgroundDim',
 ];
 const CONFIG_STATE_KEYS = [PRESET_STATE_KEY, CHART_STATE_KEYS.mode, CHART_STATE_KEYS.modelColors, CHART_STATE_KEYS.baseColor];
 const SB_ITEM_IDS = ['todayCost', 'monthCost', 'balance', 'todayTokens'];
+const SB_LABEL_DEFAULT = 'DeepSeek Usage';   // 状态栏显示的名称；可由 statusBar.label 覆盖，留空则不显示
+const SB_LABEL_MAX = 64;                     // 名称长度上限（防止把状态栏挤爆；配置导入时也按此校验）
 const CONFIG_NOT_EXPORTED = [
   'deepseek-usage-monitor.sessionToken',
   'deepseek-usage-monitor.cookie',
@@ -780,6 +782,12 @@ function sanitizeConfigSetting(shortKey, value) {
       if (!Array.isArray(value)) return undefined;
       return Array.from(new Set(value.filter((v) => SB_ITEM_IDS.indexOf(v) >= 0)));
     }
+    case 'statusBar.label': {
+      const s = String(value == null ? '' : value).replace(/[\r\n\t]+/g, ' ').trim();
+      return s.length > SB_LABEL_MAX ? undefined : s;   // 空串合法（= 不显示名称）
+    }
+    case 'statusBar.closeWhenActive':
+      return typeof value === 'boolean' ? value : undefined;   // 只接受真正的布尔值
     case 'refreshInterval': {
       const n = Number(value);
       return Number.isFinite(n) && n >= 0 && n <= 1440 ? n : undefined;
@@ -1082,12 +1090,18 @@ function renderColorPanel() {
 var toastTimer = null;
 function toast(msg) { var e = document.getElementById('toast'); e.textContent = msg; e.className = 'show'; clearTimeout(toastTimer); toastTimer = setTimeout(function() { e.className = ''; }, 2000); }
 
-// Theme-aware grid color
+// Theme-aware grid color（仅用于网格/参考线）
 function gridColor() {
   var bg = getComputedStyle(document.body).getPropertyValue('--vscode-editor-background').trim();
   var v = parseInt(bg.replace('#', ''), 16);
   if (isNaN(v)) return '#888';
   return v < 0x888888 ? '#444' : '#ddd';
+}
+
+// 图上的文字（轴刻度、空态提示）用主题前景色，与面板正文一致；
+// 与 gridColor 分开，避免"文字和网格线同色"导致的偏灰
+function labelColor() {
+  return getComputedStyle(document.body).getPropertyValue('--vscode-editor-foreground').trim() || '#ccc';
 }
 
 // ===== CANVAS HELPERS =====
@@ -1131,7 +1145,7 @@ function fmtAxis(v) {
   return v.toFixed(2);
 }
 function drawEmpty(ctx, w, h, text) {
-  ctx.fillStyle = gridColor(); ctx.font = '12px sans-serif';
+  ctx.fillStyle = labelColor(); ctx.font = '12px sans-serif';
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.fillText(text || '', w / 2, h / 2);
   ctx.textBaseline = 'alphabetic';
@@ -1172,7 +1186,7 @@ function drawCostBars(canvas, bars, granularity) {
     for (var i = 0; i <= steps; i++) {
       var y = pad.top + ph * (1 - i / steps);
       drawHLine(ctx, w, y, undefined, pad.left, w - pad.right);
-      ctx.fillStyle = gridColor(); ctx.textAlign = 'right';
+      ctx.fillStyle = labelColor(); ctx.textAlign = 'right';
       ctx.fillText(fmtAxis(max * i / steps), pad.left - 6, y + 3);
     }
 
@@ -1192,15 +1206,16 @@ function drawCostBars(canvas, bars, granularity) {
       costBars.push({ x: pad.left + i * slot, w: slot, bar: b });
     });
 
-    // x 轴刻度：与官方用量页一致 —— 在首末之间均匀取若干个（首末必有），单行标注
-    var maxLabels = Math.max(2, Math.min(6, Math.floor(pw / 150)));
+    // x 轴刻度：柱数 < 4 时全部显示，否则最多 4 个 —— 在首末之间均匀取点（首末必有），单行标注。
+    // 上限再受可用宽度约束，避免面板很窄时几个日期挤在一起
+    var maxLabels = Math.max(2, Math.min(4, Math.floor(pw / 110)));
     var count = Math.min(n, maxLabels);
     var idxs = [];
     for (var li = 0; li < count; li++) {
       var ix2 = count === 1 ? 0 : Math.round(li * (n - 1) / (count - 1));
       if (idxs.indexOf(ix2) < 0) idxs.push(ix2);
     }
-    ctx.textAlign = 'center'; ctx.fillStyle = gridColor(); ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center'; ctx.fillStyle = labelColor(); ctx.font = '10px sans-serif';
     idxs.forEach(function(i2) {
       var labels = bars[i2].label || [];
       var cx = pad.left + i2 * slot + slot / 2;
@@ -1395,8 +1410,9 @@ async function activate(context) {
 
   // ---- Status bar ----
   const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 1);
-  statusBarItem.command = 'deepseek-usage-monitor.showUsage';
-  statusBarItem.text = '$(sync~spin) DeepSeek Usage';
+  // 状态栏点击的行为由 statusBar.closeWhenActive 决定；命令面板的「打开面板」始终只开/聚焦
+  statusBarItem.command = { command: 'deepseek-usage-monitor.statusBarClick', title: i18n.title };
+  statusBarItem.text = statusText('$(sync~spin)');   // 加载态；名称已按 statusBar.label 取
   statusBarItem.tooltip = i18n.loading;
   statusBarItem.show();
 
@@ -1589,6 +1605,19 @@ async function activate(context) {
   const fmtMoney = (label, v) => `${label}:${v == null ? '—' : '¥' + v}`;
   const fmtThousands = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 
+  // 状态栏里的名称部分（默认 DeepSeek Usage，可由 statusBar.label 覆盖为任意文本）。
+  // 去掉换行与制表符：状态栏是单行文本，换行会把图标与数据挤到第二行；
+  // 允许留空 —— 此时只显示图标与数据，不显示名称。
+  function statusLabel() {
+    const raw = config().get('statusBar.label', SB_LABEL_DEFAULT);
+    return String(raw == null ? '' : raw).replace(/[\r\n\t]+/g, ' ').trim();
+  }
+
+  // 拼状态栏文本：[图标, 名称, 数据] 中为空的部分自动省略，避免多余空格
+  function statusText(icon, rest) {
+    return [icon, statusLabel(), rest].filter(Boolean).join(' ');
+  }
+
   function buildStatusSegments({ today, cost, balTotal, todayTokens }) {
     const i18n = t();
     const configured = config().get('statusBar.items', SB_DEFAULT_ITEMS);
@@ -1605,7 +1634,7 @@ async function activate(context) {
 
   function updateStatusBar() {
     const { balance, usage, month, error, errorText } = latestData;
-    if (error) { statusBarItem.text = '$(error) DeepSeek Usage'; statusBarItem.tooltip = errorText ? `${errorText}\n(${error})` : error; statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground'); return; }
+    if (error) { statusBarItem.text = statusText('$(error)'); statusBarItem.tooltip = errorText ? `${errorText}\n(${error})` : error; statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground'); return; }
     const bal = balance?.balance_infos?.[0]; const balTotal = bal ? parseFloat(bal.total_balance).toFixed(2) : null;
     // 状态栏的"本月/本日"恒为当前月与今天，与面板所选窗口无关
     const cost = month && month.totalCost != null ? month.totalCost.toFixed(2) : null;
@@ -1614,14 +1643,14 @@ async function activate(context) {
 
     // 未配置任何凭证时保留引导，避免状态栏显示一长串 —
     if (!balTotal && !month && !usage) {
-      statusBarItem.text = '$(key) DeepSeek Usage';
+      statusBarItem.text = statusText('$(key)');
       statusBarItem.tooltip = keyDegraded ? `${t().errNoApiKey}\n${t().keySessionOnly}` : t().errNoApiKey;
       statusBarItem.backgroundColor = undefined;
       return;
     }
 
     const segs = buildStatusSegments({ today, cost, balTotal, todayTokens });
-    statusBarItem.text = segs.length ? `$(credit-card) DeepSeek Usage ${segs.join(' | ')}` : '$(credit-card) DeepSeek Usage';
+    statusBarItem.text = statusText('$(credit-card)', segs.length ? segs.join(' | ') : '');
     statusBarItem.tooltip = `${t().sbMonthCost}: ¥${cost ?? '—'} | ${t().sbTodayCost}: ¥${today ?? '—'} | ${t().sbBalance}: ¥${balTotal ?? '—'}\n${t().clickDetails}`
       + (keyDegraded ? `\n${t().keySessionOnly}` : '');
     statusBarItem.backgroundColor = undefined;
@@ -1679,6 +1708,19 @@ async function activate(context) {
     panelReady = false;
     panelLang = langKey();
     currentPanel.webview.html = buildPanelHtml(t(), langKey(), currentPreset, resolveBackground(context, currentPanel.webview));
+  }
+
+  // 状态栏点击：默认只打开/聚焦（statusBar.closeWhenActive = false）；
+  // 打开该开关后，面板在前台时再点即关闭。
+  function onStatusBarClick() {
+    if (config().get('statusBar.closeWhenActive', false) === true) toggleUsagePanel();
+    else openUsagePanel();
+  }
+
+  // 只在"前台"时关闭，避免面板可见但未聚焦（例如被切到别的编辑器组）时被误关
+  function toggleUsagePanel() {
+    if (currentPanel && currentPanel.visible && currentPanel.active) { currentPanel.dispose(); return; }
+    openUsagePanel();
   }
 
   function openUsagePanel() {
@@ -2008,6 +2050,8 @@ async function activate(context) {
   // ---- Commands ----
   context.subscriptions.push(
     vscode.commands.registerCommand('deepseek-usage-monitor.showUsage', () => openUsagePanel()),
+    // 内部命令：只给状态栏点击用，不在 package.json 里声明（因此不出现在命令面板）
+    vscode.commands.registerCommand('deepseek-usage-monitor.statusBarClick', () => onStatusBarClick()),
     vscode.commands.registerCommand('deepseek-usage-monitor.refresh', () => refresh(undefined, 'command')),
     vscode.commands.registerCommand('deepseek-usage-monitor.setApiKey', () => promptApiKeyFlow()),
     vscode.commands.registerCommand('deepseek-usage-monitor.setDashboardBackground', () => setDashboardBackground()),

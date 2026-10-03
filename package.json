@@ -2,7 +2,7 @@
   "name": "deepseek-usage-monitor",
   "displayName": "DeepSeek Usage Monitor & Dashboard",
   "description": "%extension.description%",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "publisher": "Muzyu",
   "license": "MIT",
   "icon": "icon.png",
@@ -86,18 +86,30 @@
           "markdownDescription": "%config.statusBarItems.markdownDescription%",
           "order": 6
         },
+        "deepseek-usage-monitor.statusBar.label": {
+          "type": "string",
+          "default": "DeepSeek Usage",
+          "markdownDescription": "%config.statusBarLabel.markdownDescription%",
+          "order": 7
+        },
+        "deepseek-usage-monitor.statusBar.closeWhenActive": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "%config.statusBarCloseWhenActive.markdownDescription%",
+          "order": 8
+        },
         "deepseek-usage-monitor.refreshInterval": {
           "type": "number",
           "default": 1,
           "minimum": 0,
           "markdownDescription": "%config.refreshInterval.markdownDescription%",
-          "order": 7
+          "order": 9
         },
         "deepseek-usage-monitor.dashboard.backgroundColor": {
           "type": "string",
           "default": "",
           "markdownDescription": "%config.dashboardBackgroundColor.markdownDescription%",
-          "order": 8
+          "order": 10
         },
         "deepseek-usage-monitor.dashboard.backgroundDim": {
           "type": "number",
@@ -105,7 +117,7 @@
           "minimum": 0,
           "maximum": 0.9,
           "markdownDescription": "%config.dashboardBackgroundDim.markdownDescription%",
-          "order": 9
+          "order": 11
         },
         "deepseek-usage-monitor.dashboard.cardOpacity": {
           "type": "number",
@@ -113,7 +125,7 @@
           "minimum": 0.3,
           "maximum": 1,
           "markdownDescription": "%config.dashboardCardOpacity.markdownDescription%",
-          "order": 10
+          "order": 12
         }
       }
     },

@@ -2,6 +2,18 @@
 
 [简体中文](CHANGELOG.md) ｜ **English**
 
+## 2.1.0 — 2026-10-03
+
+### Added
+
+- **Quickly close the dashboard**: while the dashboard is in the foreground, clicking the status bar item closes it. The switch lives in Settings and is off by default
+- **Customizable status bar label**: the default "DeepSeek Usage" text can now be replaced with any text of up to 64 characters
+
+### Changed
+
+- The bar chart's axis labels now use the foreground color, which makes them easier to read
+- The x-axis tick labels now behave like the official usage page: at most four ticks
+
 ## 2.0.0 — 2026-09-30
 
 ### Added

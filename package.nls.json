@@ -8,6 +8,8 @@
   "config.proxy.description": "HTTP proxy URL (optional). Fill this in if you need a proxy to reach the platform; leave it empty for a direct connection.",
   "config.language.description": "Language of the dashboard and extension messages (the text on the VSCode settings page follows VSCode's own display language).",
   "config.statusBarItems.markdownDescription": "Which items the status bar shows (**array order = display order**); leave empty to show the icon only.\n\n- `todayCost` — Today: ¥xx.xx\n- `monthCost` — Month: ¥xx.xx\n- `balance` — Balance: ¥xx.xx\n- `todayTokens` — Today xxx tokens\n\nMissing values are shown as `—` (today/month data needs Session Token & Cookie).",
+  "config.statusBarLabel.markdownDescription": "Name shown in the status bar, `DeepSeek Usage` by default. You can replace it with any text (VSCode icon syntax works, e.g. `$(rocket) DS usage`). **Leave it empty to show only the icon and the data.** Up to 64 characters.",
+  "config.statusBarCloseWhenActive.markdownDescription": "Click the status bar item again to close the dashboard while it is in the foreground.\n\n**When off (default)** clicking always opens the dashboard, or focuses it if it is already open.",
   "config.refreshInterval.markdownDescription": "Auto-refresh interval (**in minutes**). Default `1`. Decimals are allowed (e.g. `0.5` = 30 seconds); set `0` to disable auto-refresh.",
   "command.setDashboardBackground": "DeepSeek Usage Monitor: Set Dashboard Background",
   "command.clearDashboardBackground": "DeepSeek Usage Monitor: Clear Dashboard Background",
