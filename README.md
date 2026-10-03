@@ -32,18 +32,20 @@
 
 在设置中搜索 `deepseek-usage-monitor`，或编辑 `settings.json`：
 
-| 配置项                                               | 说明                                                                                                                               | 必填         |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------ |
-| `API Key`                                          | 点击详情面板中的“设置 API Key”按钮进行设置                                                                                       | 是           |
-| `deepseek-usage-monitor.sessionToken`              | Session Token (`Bearer ...`)，用于查询用量                                                                                       | 是           |
-| `deepseek-usage-monitor.cookie`                    | 浏览器 Cookie，与 Session Token 配合使用                                                                                           | 是           |
-| `deepseek-usage-monitor.proxy`                     | HTTP 代理地址                                                                                                                      | 否           |
-| `deepseek-usage-monitor.language`                  | 显示语言：`en` / `zh-cn`                                                                                                       | 否(默认简中) |
+| 配置项                                             | 说明                                                                                                                     | 必填         |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ------------ |
+| `API Key`                                          | 点击详情面板中的“设置 API Key”按钮进行设置                                                                               | 是           |
+| `deepseek-usage-monitor.sessionToken`              | Session Token (`Bearer ...`)，用于查询用量                                                                               | 是           |
+| `deepseek-usage-monitor.cookie`                    | 浏览器 Cookie，与 Session Token 配合使用                                                                                 | 是           |
+| `deepseek-usage-monitor.proxy`                     | HTTP 代理地址                                                                                                            | 否           |
+| `deepseek-usage-monitor.language`                  | 显示语言：`en` / `zh-cn`                                                                                                 | 否(默认简中) |
 | `deepseek-usage-monitor.statusBar.items`           | 状态栏显示项（数组，顺序即显示顺序）：`todayCost` / `monthCost` / `balance` / `todayTokens`，默认 `[todayCost, balance]` | 否           |
-| `deepseek-usage-monitor.refreshInterval`           | 自动刷新间隔（单位：分钟），默认`1`；可填小数（`0.5` = 30 秒），设为 `0` 则关闭自动刷新                                      | 否           |
-| `deepseek-usage-monitor.dashboard.backgroundColor` | 面板背景：CSS 颜色或渐变（如`#0b1220`、`linear-gradient(135deg,#0b1220,#1b2a4a)`），留空跟随主题                               | 否           |
-| `deepseek-usage-monitor.dashboard.backgroundDim`   | 背景图之上的暗化程度`0`–`0.9`（默认 `0.4`），用于保证文字可读性，仅对图片生效                                               | 否           |
-| `deepseek-usage-monitor.dashboard.cardOpacity`     | 有自定义背景时卡片底色的不透明度`0.3`–`1`（默认 `0.82`；浅色主题自动 +0.06）                                                | 否           |
+| `deepseek-usage-monitor.statusBar.label`           | 状态栏显示的名称，默认 `DeepSeek Usage`；可填任意文本（支持 `$(icon)` 图标语法），留空则只显示图标与数据                 | 否           |
+| `deepseek-usage-monitor.statusBar.closeWhenActive` | 面板在前台时点按状态栏关闭面板；关闭此项时（默认）点击只打开 / 聚焦                                                      | 否           |
+| `deepseek-usage-monitor.refreshInterval`           | 自动刷新间隔（单位：分钟），默认`1`；可填小数（`0.5` = 30 秒），设为 `0` 则关闭自动刷新                                  | 否           |
+| `deepseek-usage-monitor.dashboard.backgroundColor` | 面板背景：CSS 颜色或渐变（如`#0b1220`、`linear-gradient(135deg,#0b1220,#1b2a4a)`），留空跟随主题                         | 否           |
+| `deepseek-usage-monitor.dashboard.backgroundDim`   | 背景图之上的暗化程度`0`–`0.9`（默认 `0.4`），用于保证文字可读性，仅对图片生效                                            | 否           |
+| `deepseek-usage-monitor.dashboard.cardOpacity`     | 有自定义背景时卡片底色的不透明度`0.3`–`1`（默认 `0.82`；浅色主题自动 +0.06）                                             | 否           |
 
 > 图表配色（官方色阶 / 按模型指定 / 单主色阶梯）不作为设置项：在面板柱状图卡片右上角点「配色」按钮设置，随面板状态保存。
 > 背景图与配置迁移也可从面板右上角「⚙ 设置」菜单进入。
@@ -59,8 +61,8 @@
 
 ## 命令
 
-| 命令                                                   | 说明                                                                 |
-| ------------------------------------------------------ | -------------------------------------------------------------------- |
+| 命令                                                 | 说明                                                                 |
+| ---------------------------------------------------- | -------------------------------------------------------------------- |
 | `DeepSeek Usage Monitor: Open Dashboard`             | 打开用量面板                                                         |
 | `DeepSeek Usage Monitor: Refresh`                    | 手动刷新                                                             |
 | `DeepSeek Usage Monitor: Set API Key`                | 设置 API Key（写入 SecretStorage）                                   |
