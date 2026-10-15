@@ -2,7 +2,7 @@
   "name": "deepseek-usage-monitor",
   "displayName": "DeepSeek Usage Monitor & Dashboard",
   "description": "%extension.description%",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "publisher": "Muzyu",
   "license": "MIT",
   "icon": "icon.png",
@@ -18,13 +18,14 @@
     "vscode": "^1.85.0"
   },
   "categories": [
-    "Other"
+    "AI"
   ],
   "keywords": [
     "deepseek",
     "usage",
     "token",
     "cost",
+    "bar",
     "dashboard"
   ],
   "activationEvents": [

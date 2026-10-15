@@ -47,7 +47,8 @@ const L10N = {
     title: 'DeepSeek Usage',
     usageTitle: 'Usage',
     tzNote: 'All dates are in GMT+8. Data may be delayed up to 5 minutes.',
-    toppedUpBalance: 'Top-up Balance',
+    toppedUpBalance: 'Topped-up balance',
+    grantedBalance: 'Granted balance',
     todayCost: "Today's Cost",
     costAmount: 'Cost',
     costCny: 'Cost (CNY)',
@@ -98,7 +99,6 @@ const L10N = {
     errEntry: '{0}: {1}',
     genericError: 'DeepSeek Usage error: {0}',
     clickDetails: 'Click for details',
-    granted: 'Granted',
     bgPickTitle: 'Select a background image',
     bgPathPrompt: 'Enter the absolute path of the image on the machine running the extension host',
     bgFileMissing: 'File not found: {0}',
@@ -136,6 +136,7 @@ const L10N = {
     usageTitle: '用量信息',
     tzNote: '所有日期均按 GMT+8 时间显示，数据可能有 5 分钟延迟。',
     toppedUpBalance: '充值余额',
+    grantedBalance: '赠送金额',
     todayCost: '今日消费',
     costAmount: '消费金额',
     costCny: '消费金额（CNY）',
@@ -186,7 +187,6 @@ const L10N = {
     errEntry: '{0}：{1}',
     genericError: 'DeepSeek Usage 出错：{0}',
     clickDetails: '点击查看详情',
-    granted: '赠送',
     bgPickTitle: '选择背景图片',
     bgPathPrompt: '请输入图片在扩展宿主所在机器上的绝对路径',
     bgFileMissing: '文件不存在：{0}',
@@ -874,6 +874,8 @@ h1{font-size:18px;font-weight:600}
 .banner[hidden]{display:none}
 .border{--card-border:var(--vscode-widget-border,rgba(128,128,128,.25))}
 .cards-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+/* 赠送金额 > 0 时首行多一张卡，列数随之变成 3（卡本身由脚本显隐） */
+.cards-2.gift{grid-template-columns:repeat(3,minmax(0,1fr))}
 .cards-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
 .card{background:var(--ds-card-bg,var(--vscode-editorWidget-background,var(--vscode-input-background)));border:1px solid var(--vscode-widget-border,rgba(128,128,128,.25));border-radius:6px;padding:14px 16px;min-width:0}
 .card-row{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
@@ -937,7 +939,7 @@ ${bgCss}</style></head>
 <div class="subtitle">${i18n.tzNote}</div>
 <div id="errBanner" class="banner" hidden></div>
 
-<div class="cards-2">
+<div class="cards-2" id="topRow">
   <div class="card">
     <div class="card-row">
       <div style="min-width:0">
@@ -951,6 +953,10 @@ ${bgCss}</style></head>
     <div class="label">${i18n.todayCost}</div>
     <div class="value" id="todayValue">—</div><span class="suffix" id="todaySuffix" hidden>CNY</span>
     <div class="sub" id="todaySub"></div>
+  </div>
+  <div class="card" id="giftCard" hidden>
+    <div class="label">${i18n.grantedBalance}</div>
+    <div class="value" id="giftValue">—</div><span class="suffix" id="giftSuffix" hidden>CNY</span>
   </div>
 </div>
 
@@ -1256,10 +1262,11 @@ function render() {
   show('updatedAt', !!d.updatedAt);
 
   // 卡A：充值余额（topped_up_balance，与官方「充值余额」同口径）
+  // 赠送金额 > 0 时，今日消费右侧多一张「赠送金额」卡，首行由两列变三列
+  var hasGift = !!(d.hasBalance && d.bal && d.bal.granted > 0);
   if (d.hasBalance && d.bal) {
     setText('topupValue', '¥' + fmtCost(d.bal.toppedUp)); show('topupSuffix', true);
-    var subs = [];
-    if (d.bal.granted > 0) subs.push(L.granted + ': ¥' + fmtCost(d.bal.granted));
+    var subs = [];                                          // 赠送金额不在这里重复：单独有卡
     if (d.bal.insufficient) subs.push(L.balanceInsufficient);
     if (d.keyDegraded) subs.push(L.keySessionOnly);
     setText('topupSub', subs.join(' · '));          // 无内容时不占位（见 .sub[hidden]）
@@ -1269,6 +1276,10 @@ function render() {
     setText('topupSub', d.keyDegraded ? (L.errNoApiKey + ' · ' + L.keySessionOnly) : L.errNoApiKey);
     show('topupSub', true);
   }
+  if (hasGift) { setText('giftValue', '¥' + fmtCost(d.bal.granted)); show('giftSuffix', true); }
+  show('giftCard', hasGift);
+  var topRow = document.getElementById('topRow');
+  if (topRow) topRow.className = hasGift ? 'cards-2 gift' : 'cards-2';   // 三张卡才配三列，否则留白
 
   // 卡B：今日消费（始终表示今天，与图表所选窗口无关）
   if (d.hasToday) {

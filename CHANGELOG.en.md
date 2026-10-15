@@ -2,6 +2,13 @@
 
 [简体中文](CHANGELOG.md) ｜ **English**
 
+## 2.2.0 — 2026-10-15
+
+### Changed
+
+- **Granted balance gets its own card**: instead of being shown under the "Topped-up balance" card as in the previous version, the granted balance now has a dedicated card
+- **Marketplace category change**: the Open VSX “Categories” tag was changed from "Other" to "AI"
+
 ## 2.1.0 — 2026-10-03
 
 ### Added
