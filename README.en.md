@@ -15,17 +15,21 @@ Keep an eye on your DeepSeek API balance and usage inside VSCode: a customizable
   <img src="image/README/StatusBar_en_2.png" width="450" alt="Status bar readout 2">
 - **Customizable dashboard background**: pick an image, a solid color or a gradient; the image scales with the panel size, so it looks the way you want while keeping the information readable
   <img src="image/README/Dashboard_en.png" width="720" alt="Dashboard">
-- **Customizable colors for the official-style bar chart**: three modes — official palette / per-model colors / single base color with automatic shades — with a built-in color picker that supports RGB / HSL / HEX input
+- **Customizable colors for the official-style bar charts**: three charts — Cost / API requests / Tokens — whose visibility, order and colors are configured independently. Three color modes:
   - Official palette: the same colors the DeepSeek usage page uses
-  - Per model: one color per model; models without an entry fall back to the official palette
+  - Per model: give each model its own color; models without an entry fall back to the official palette
   - Single base color: pick one color and the extension spreads it into shades, one per model, from light to dark
 - **Customizable refresh interval**: set any interval you like; once a minute by default
+- **Customizable dashboard font size**: adjust the dashboard font scale; text, card values and chart labels scale together
 
 ### 2. Thoughtful details
 
-- **A dashboard that reads at a glance:** top-up balance, today's cost, cost / API requests / tokens for a selectable range, and a per-model cost bar chart
+- **A dashboard that reads at a glance:** top-up balance, cost statistics, granted balance, cost / API requests / tokens for a selectable range, and the per-model stacked bar charts
+- **One card, three views**: click the button to switch the statistics card between today's cost / this month's cost / total cost
 - **Chinese and English UI**: the settings page and command titles automatically follow VSCode's global setting, while the dashboard and error notifications can be configured separately (Simplified Chinese by default)
-- **API Token encrypted storage:** the API Key is kept in VSCode's SecretStorage to protect your privacy
+- **Multi-currency support**: balances and costs are listed per currency (e.g. 10.00 CNY + 5.00 USD), and the cost chart can be viewed per currency
+- **Configurable time zone**: follows your local time zone by default; any time zone can be set manually
+- **API Key encrypted storage:** the API Key is kept in VSCode's SecretStorage to protect your privacy
 - **HTTP proxy support**: inherited from the original project
 
 ## Configuration
@@ -46,8 +50,12 @@ Search for `deepseek-usage-monitor` in Settings, or edit `settings.json`:
 | `deepseek-usage-monitor.dashboard.backgroundColor` | Dashboard background: a CSS color or gradient (`#0b1220`, `linear-gradient(135deg,#0b1220,#1b2a4a)`); leave empty to follow the theme                        | No                  |
 | `deepseek-usage-monitor.dashboard.backgroundDim`   | Dimming applied over the background image, `0`–`0.9` (default `0.4`); keeps the text readable, image only                                                    | No                  |
 | `deepseek-usage-monitor.dashboard.cardOpacity`     | Opacity of the card background when a custom background is active, `0.3`–`1` (default `0.82`; +0.06 in light themes)                                         | No                  |
+| `deepseek-usage-monitor.dashboard.fontScale`       | Dashboard font scale, `0.8`–`1.4` (default `1`); affects the dashboard only                                                                                 | No                  |
+| `deepseek-usage-monitor.charts.items`              | Which bar charts the dashboard shows (array; order = panel order): `cost` / `requests` / `tokens`; all by default, empty hides every chart                  | No                  |
+| `deepseek-usage-monitor.timezone`                  | Time zone: empty = follow the local (client) machine; any IANA zone name (e.g. `Asia/Shanghai`) or a shorthand like `GMT+8` / `UTC-5`; refetches immediately | No                  |
+| `deepseek-usage-monitor.chartColors`               | Colors of the three bar charts (normally written by the “Colors” button on each chart); migrates with Settings Sync and Export / Import Configuration; empty = official palette | No                  |
 
-> Chart colors (official palette / per model / single base color) are not settings: set them with the “Colors” button in the top-right corner of the bar chart card; they are stored with the dashboard state.
+> Chart colors are a setting too (`chartColors`); the usual way to change them is the “Colors” button on each chart, which applies immediately. Being a setting, it migrates with Settings Sync and the Export / Import Configuration commands.
 > The background image and the configuration migration are also reachable from the “⚙ Settings” menu in the top-right corner of the dashboard.
 
 ### How to get the Session Token and Cookie (verified September 2026)

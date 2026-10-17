@@ -2,7 +2,7 @@
   "name": "deepseek-usage-monitor",
   "displayName": "DeepSeek Usage Monitor & Dashboard",
   "description": "%extension.description%",
-  "version": "2.2.0",
+  "version": "3.0.0-beta.1",
   "publisher": "Muzyu",
   "license": "MIT",
   "icon": "icon.png",
@@ -17,6 +17,9 @@
   "engines": {
     "vscode": "^1.85.0"
   },
+  "extensionKind": [
+    "ui"
+  ],
   "categories": [
     "AI"
   ],
@@ -29,7 +32,7 @@
     "dashboard"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "*"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -127,6 +130,45 @@
           "maximum": 1,
           "markdownDescription": "%config.dashboardCardOpacity.markdownDescription%",
           "order": 12
+        },
+        "deepseek-usage-monitor.dashboard.fontScale": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0.8,
+          "maximum": 1.4,
+          "markdownDescription": "%config.dashboardFontScale.markdownDescription%",
+          "order": 13
+        },
+        "deepseek-usage-monitor.charts.items": {
+          "type": "array",
+          "default": [
+            "cost",
+            "requests",
+            "tokens"
+          ],
+          "items": {
+            "type": "string",
+            "enum": [
+              "cost",
+              "requests",
+              "tokens"
+            ]
+          },
+          "uniqueItems": true,
+          "markdownDescription": "%config.chartsItems.markdownDescription%",
+          "order": 14
+        },
+        "deepseek-usage-monitor.timezone": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "%config.timezone.markdownDescription%",
+          "order": 15
+        },
+        "deepseek-usage-monitor.chartColors": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "%config.chartColors.markdownDescription%",
+          "order": 16
         }
       }
     },

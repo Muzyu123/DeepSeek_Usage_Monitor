@@ -2,12 +2,36 @@
 
 [简体中文](CHANGELOG.md) ｜ **English**
 
+## 3.0.0-beta.1 — 2026-10-17
+
+### Added
+
+- **API requests & Tokens bar charts**: similar to the "Cost" chart, but each chart has its own color settings; the three charts (Cost / API requests / Tokens) can each be shown or hidden, and their order is configurable
+- **Time zone auto-detection**: the extension automatically detects your machine's time zone by default, and any time zone can be set manually
+- **Cycling the cost-statistics card**: clicking the button in the card's top-right corner cycles the card content between "Today's cost → This month's cost → Total cost"
+- **Customizable dashboard font size**: new `dashboard.fontScale` setting (`0.8`–`1.4`); dashboard text, card values and chart axis labels scale together
+- **Tokens breakdown tooltip**: hovering a Tokens bar shows, for each model, "Input (cache hit) / Input (cache miss) / Output / Cache hit rate"
+
+### Changed
+
+- **The extension host now always runs locally**: when connected to a remote host, the extension host moves from the remote machine to your local machine, so private data is stored locally and requests no longer go through the remote server
+- **File picker in remote windows**: in a remote window, picking a background image, importing a configuration or exporting a configuration now opens the OS's native file dialog on the local machine instead of VSCode's remote file picker
+- **Clearer messages when the dashboard has no data**: the previous single "Configure Session Token & Cookie" is now split into four states — fetching data / credentials not configured / credentials configured but the request failed / no data in this period — which pinpoints why no data is shown
+- **Faster color changes**: changing only the bar chart colors re-renders the chart without fetching the data again
+- **Amounts show the currency code only**: amounts now read `10.00 USD` (value + code) instead of using symbols such as `$` / `¥`
+- **Faster startup**: `activationEvents` changed from `onStartupFinished` to `*`, so the status bar no longer waits for the remote connection to complete and appears together with the window
+
+### Fixed
+
+- **Currency was hard-coded to CNY**: accounts holding several currencies are now supported — the balance / cost cards list every currency, and the cost chart lets you switch between them
+- **Configuration migration omission**: card opacity can now be exported and imported with the configuration file
+
 ## 2.2.0 — 2026-10-15
 
 ### Changed
 
 - **Granted balance gets its own card**: instead of being shown under the "Topped-up balance" card as in the previous version, the granted balance now has a dedicated card
-- **Marketplace category change**: the Open VSX “Categories” tag was changed from "Other" to "AI"
+- **Marketplace category change**: the Open VSX "Categories" tag was changed from "Other" to "AI"
 
 ## 2.1.0 — 2026-10-03
 
@@ -58,7 +82,7 @@
 
 ### Fixed
 
-- **Day-boundary error that shifted everything by 8 hours**: the platform's monthly endpoint buckets by UTC, so usage between 00:00 and 08:00 (GMT+8) was counted towards the previous day. The monthly endpoint has been dropped in favour of the range endpoint.
+- **Day-boundary error that shifted everything by 8 hours**: the platform's monthly endpoint buckets by UTC, so usage between 00:00 and 08:00 (GMT+8) was counted toward the previous day. The monthly endpoint has been dropped in favour of the range endpoint.
 
 ### Changed
 

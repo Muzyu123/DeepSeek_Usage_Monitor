@@ -6,11 +6,16 @@
  *   余额  → api.deepseek.com/user/balance (API Key sk-...)
  *   用量  → platform.deepseek.com/api/v0/usage/* (Session Token + Cookie)
  *
- * 面板视觉元素复刻自deepseek官方 platform.deepseek.com/usage（用量信息页）：
- *   包含充值余额 / 今日消费 / 月份选择 / 每月消费金额·API请求次数·Tokens / 按模型堆叠的每日消费柱状图
+ * 面板视觉元素复刻自 DeepSeek 官方 platform.deepseek.com/usage（用量信息页）：
+ *   包含充值余额 / 消费统计 / 时间范围（今天·昨天·近7天·近30天·本月·上月）/
+ *   消费金额·API请求次数·Tokens 三张按模型堆叠柱状图
  */
 
 const vscode = require('vscode');
+const os = require('os');
+
+// 从扩展脚本加载到 activate() 的耗时：配合 activationEvents 观察启动延迟
+const LOADED_AT = Date.now();
 const https = require('https');
 const http = require('http');
 const tls = require('tls');
@@ -39,21 +44,29 @@ const BG_CARD_OPACITY_MIN = 0.3;
 //  Constants & i18n
 // ============================================================
 
-// 平台按 UTC+8 口径返回日期（请求头 x-client-timezone-offset: 28800）
-const TZ8_OFFSET_MS = 8 * 3600 * 1000;
+const TZ_CLIENT_KEY = 'deepseekUsage.clientTimeZone';   // 面板上报的客户端时区（auto 模式用）
+const COST_CARD_KEY = 'deepseekUsage.costCard';          // 首行消费统计卡：today / month / total
 
 const L10N = {
   en: {
     title: 'DeepSeek Usage',
     usageTitle: 'Usage',
-    tzNote: 'All dates are in GMT+8. Data may be delayed up to 5 minutes.',
+    tzNote: 'Current time zone: {0}. Data may be delayed up to 5 minutes.',
+    tzInvalid: 'Unknown time zone: {0}. Falling back to the local time zone.',
     toppedUpBalance: 'Topped-up balance',
     grantedBalance: 'Granted balance',
-    todayCost: "Today's Cost",
+    costCardTotal: 'Total cost',
+    costCardSwitchHint: 'Switch the card content: today / this month / total',
+    todayCost: "Today's cost",
+    monthCostCard: "This month's cost",
     costAmount: 'Cost',
-    costCny: 'Cost (CNY)',
+    currencyTag: ' ({0})',
     apiRequests: 'API requests',
     tokens: 'Tokens',
+    tokenCacheHit: 'Input (cache hit)',
+    tokenCacheMiss: 'Input (cache miss)',
+    tokenOutput: 'Output',
+    tokenCacheRate: 'Cache hit rate',
     rangeLabel: 'Time range',
     rangeToday: 'Today',
     rangeYesterday: 'Yesterday',
@@ -61,7 +74,7 @@ const L10N = {
     rangeLast30: 'Last 30 days',
     rangeThisMonth: 'This month',
     rangeLastMonth: 'Last month',
-    noDataRange: 'No cost data in this period',
+    noDataRange: 'No data in this period',
     updatedAtLabel: 'Updated {0}',
     loading: 'Loading...', refresh: 'Refresh',
     settings: '⚙ Settings', setApiKey: 'Set API Key', setBg: 'Set Background',
@@ -71,21 +84,21 @@ const L10N = {
     sbTodayCost: 'Today', sbMonthCost: 'Month', sbBalance: 'Balance', sbTodayTokens: 'Today',
     noSessionToken: 'Configure Session Token & Cookie',
     errNoApiKey: 'Set API Key',
-    loadFailed: 'Failed to load usage data',
-    sessionExpired: 'Session expired — update your Session Token',
+    loadFailed: 'Failed to load usage data. Try refreshing or updating the Session Token / Cookie',
+    sessionExpired: 'Session expired — update the Session Token',
     balanceInsufficient: 'Insufficient balance',
     keySessionOnly: 'Session only (system keyring unavailable)',
     enterApiKey: 'Enter DeepSeek API Key',
-    errEmptyKey: 'Input is empty: enter an API key (format sk-xxx)',
-    errKeyFormat: 'Invalid format: the API key must start with sk- (format sk-xxx)',
+    errEmptyKey: 'Input is empty: enter an API Key (format sk-xxx)',
+    errKeyFormat: 'Invalid format: the API Key must start with sk- (format sk-xxx)',
     keySaved: 'API Key saved',
     keySavedSession: 'API Key saved (valid only for this time)',
-    keyPersistFailed: 'API key is active for this session only: the system keyring is unavailable, re-enter it after restart',
-    keyringUnavailable: 'System keyring unavailable ({0}): re-enter the API key; it will only be valid for this session and must be re-entered after a restart',
+    keyPersistFailed: 'API Key is active for this session only: the system keyring is unavailable, re-enter it after restart',
+    keyringUnavailable: 'System keyring unavailable ({0}): re-enter the API Key; it will only be valid for this session and must be re-entered after a restart',
     keyReadTimeout: 'read timed out after {0}ms',
     keyReadFailed: 'read failed',
-    keyNotPersisted: 'the API key saved earlier could not be read',
-    errApiKey401: 'API key invalid (401)',
+    keyNotPersisted: 'the API Key saved earlier could not be read',
+    errApiKey401: 'API Key invalid (401)',
     errHttp: 'Request failed: HTTP {0}',
     errRateLimited: 'Too many requests — try again later',
     errBadResponse: 'Unexpected response format',
@@ -100,7 +113,7 @@ const L10N = {
     genericError: 'DeepSeek Usage error: {0}',
     clickDetails: 'Click for details',
     bgPickTitle: 'Select a background image',
-    bgPathPrompt: 'Enter the absolute path of the image on the machine running the extension host',
+    bgPathPrompt: 'Enter the local absolute path of the image',
     bgFileMissing: 'File not found: {0}',
     bgBadFormat: 'Unsupported image format: {0}',
     bgTooLarge: 'Image is too large ({0} MB); the limit is {1} MB',
@@ -108,7 +121,6 @@ const L10N = {
     bgCleared: 'Dashboard background image cleared',
     bgPickActionTitle: 'Select an action',
     chartColorsBtn: 'Colors',
-    colorModeLabel: 'Color mode',
     colorModeOfficial: 'Official palette',
     colorModeModel: 'Per model',
     colorModeMono: 'Auto shades',
@@ -134,14 +146,22 @@ const L10N = {
   'zh-cn': {
     title: 'DeepSeek Usage',
     usageTitle: '用量信息',
-    tzNote: '所有日期均按 GMT+8 时间显示，数据可能有 5 分钟延迟。',
+    tzNote: '当前时区：{0}，数据可能有 5 分钟延迟。',
+    tzInvalid: '无法识别的时区：{0}，已回落为跟随本机时区。',
     toppedUpBalance: '充值余额',
     grantedBalance: '赠送金额',
+    costCardTotal: '累计消费',
+    costCardSwitchHint: '切换卡片显示内容：今日消费 / 本月消费 / 累计消费',
     todayCost: '今日消费',
+    monthCostCard: '本月消费',
     costAmount: '消费金额',
-    costCny: '消费金额（CNY）',
+    currencyTag: '（{0}）',
     apiRequests: 'API 请求次数',
     tokens: 'Tokens',
+    tokenCacheHit: '输入（命中缓存）',
+    tokenCacheMiss: '输入（未命中缓存）',
+    tokenOutput: '输出',
+    tokenCacheRate: '缓存命中率',
     rangeLabel: '时间范围',
     rangeToday: '今天',
     rangeYesterday: '昨天',
@@ -149,7 +169,7 @@ const L10N = {
     rangeLast30: '近30天',
     rangeThisMonth: '本月',
     rangeLastMonth: '上月',
-    noDataRange: '该时间段暂无消费数据',
+    noDataRange: '该时间段暂无数据',
     updatedAtLabel: '数据更新时间 {0}',
     loading: '加载中...', refresh: '刷新',
     settings: '⚙ 设置', setApiKey: '设置 API Key', setBg: '设置背景图',
@@ -159,7 +179,7 @@ const L10N = {
     sbTodayCost: '本日消费', sbMonthCost: '本月消费', sbBalance: '账户余额', sbTodayTokens: '本日消耗',
     noSessionToken: '请在设置中配置 Session Token 和 Cookie',
     errNoApiKey: '请设置 API Key',
-    loadFailed: '加载用量数据失败',
+    loadFailed: '加载用量数据失败，请尝试刷新或更新Session Token/Cookie',
     sessionExpired: '会话已过期，请更新 Session Token',
     balanceInsufficient: '余额不足，请充值',
     keySessionOnly: '仅本次会话有效（系统密钥环不可用）',
@@ -173,7 +193,7 @@ const L10N = {
     keyReadTimeout: '读取超时 >{0}ms',
     keyReadFailed: '读取失败',
     keyNotPersisted: '未读取到上次保存的 API Key',
-    errApiKey401: 'API Key 无效 (401)',
+    errApiKey401: 'API Key 无效(401)',
     errHttp: '请求失败：HTTP {0}',
     errRateLimited: '请求过于频繁，请稍后重试',
     errBadResponse: '响应格式异常',
@@ -188,7 +208,7 @@ const L10N = {
     genericError: 'DeepSeek Usage 出错：{0}',
     clickDetails: '点击查看详情',
     bgPickTitle: '选择背景图片',
-    bgPathPrompt: '请输入图片在扩展宿主所在机器上的绝对路径',
+    bgPathPrompt: '请输入图片的本地绝对路径',
     bgFileMissing: '文件不存在：{0}',
     bgBadFormat: '不支持的图片格式：{0}',
     bgTooLarge: '图片过大（{0} MB），上限 {1} MB',
@@ -196,7 +216,6 @@ const L10N = {
     bgCleared: '面板背景图已清除',
     bgPickActionTitle: '请选择操作',
     chartColorsBtn: '配色',
-    colorModeLabel: '配色方式',
     colorModeOfficial: '官方色阶',
     colorModeModel: '按模型指定',
     colorModeMono: '单主色阶梯',
@@ -254,7 +273,124 @@ function humanizeError(msg) {
 
 function pad2(n) { return String(n).padStart(2, '0'); }
 
-function tz8Now() { return new Date(Date.now() + TZ8_OFFSET_MS); }
+// ============================================================
+//  Time Zone —— 默认 UTC+8；可跟随客户端，或由设置指定任意 IANA 时区
+// ============================================================
+const DEFAULT_ZONE = 'Etc/GMT-8';   // IANA 的 Etc 区符号与直觉相反：Etc/GMT-8 就是 UTC+8
+let activeZone = DEFAULT_ZONE;
+const zoneFmtCache = new Map();
+
+// 固定偏移时区（Etc/GMT±N、UTC）可以纯算术换算，不初始化 Intl。
+// 默认时区就走这条路：启动路径不付 ICU 初始化的钱（首次创建 Intl 格式器可达数百毫秒）
+function fixedOffsetOf(zone) {
+  const z = zone || activeZone;
+  const m = /^Etc\/GMT([+-])(\d{1,2})$/.exec(z);
+  if (m) return (m[1] === '-' ? 1 : -1) * Number(m[2]) * 3600;
+  if (z === 'UTC' || z === 'Etc/UTC') return 0;
+  return null;
+}
+
+function zoneValid(zone) {
+  if (!zone || typeof zone !== 'string') return false;
+  if (fixedOffsetOf(zone) != null) return true;
+  try { new Intl.DateTimeFormat('en-US', { timeZone: zone }); return true; } catch (e) { return false; }
+}
+
+// 友好别名：GMT+8 / UTC-5 → Etc/GMT-8 / Etc/GMT+5（Etc 区只支持整小时）
+function normalizeZone(raw) {
+  const str = String(raw == null ? '' : raw).trim();
+  if (!str) return '';
+  const m = /^(?:GMT|UTC)\s*([+-])(\d{1,2})(?::?(\d{2}))?$/i.exec(str);
+  if (m) {
+    if (m[3] && m[3] !== '00') return '';
+    return 'Etc/GMT' + (m[1] === '+' ? '-' : '+') + String(Number(m[2]));
+  }
+  return zoneValid(str) ? str : '';
+}
+
+function setActiveZone(zone) {
+  if (zoneValid(zone)) activeZone = zone;
+  return activeZone;
+}
+
+function zoneFmt(zone) {
+  const z = zone || activeZone;
+  let f = zoneFmtCache.get(z);
+  if (!f) {
+    f = new Intl.DateTimeFormat('en-US', {
+      timeZone: z, hour12: false, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+    zoneFmtCache.set(z, f);
+  }
+  return f;
+}
+
+// 绝对秒 → 该时区的日历字段（hour 24 归 0）
+function zoneParts(tsSec, zone) {
+  const fixed = fixedOffsetOf(zone);
+  if (fixed != null) {
+    const d = new Date((tsSec + fixed) * 1000);
+    return {
+      year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate(),
+      hour: d.getUTCHours(), minute: d.getUTCMinutes(), second: d.getUTCSeconds(),
+    };
+  }
+  const p = {};
+  for (const it of zoneFmt(zone).formatToParts(new Date(tsSec * 1000))) p[it.type] = it.value;
+  return {
+    year: Number(p.year), month: Number(p.month), day: Number(p.day),
+    hour: Number(p.hour) % 24, minute: Number(p.minute), second: Number(p.second),
+  };
+}
+
+// 该时区在某一刻的偏移（秒，东正西负）
+function zoneOffsetSec(tsSec, zone) {
+  const fixed = fixedOffsetOf(zone);
+  if (fixed != null) return fixed;
+  const p = zoneParts(tsSec, zone);
+  return Math.round((Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) - tsSec * 1000) / 1000);
+}
+
+// 该时区日历日 00:00 的绝对秒。跨 DST 时以当天 00:00 的偏移为准，二次校正
+function zoneDayStartSecOf(year, month, day, zone) {
+  const naive = Math.floor(Date.UTC(year, month - 1, day) / 1000);
+  const off = zoneOffsetSec(naive, zone);
+  let start = naive - off;
+  const off2 = zoneOffsetSec(start, zone);
+  if (off2 !== off) start = naive - off2;
+  return start;
+}
+
+function zoneDayStartSec(tsSec, zone) {
+  const p = zoneParts(tsSec, zone);
+  return zoneDayStartSecOf(p.year, p.month, p.day, zone);
+}
+
+// 绝对秒 → 所属时区整点（+05:30 这类偏移也对齐到本地整点）
+function zoneHourStartSec(tsSec, zone) {
+  const off = zoneOffsetSec(tsSec, zone);
+  const startLocal = Math.floor((tsSec + off) / 3600) * 3600;
+  const start = startLocal - off;
+  const off2 = zoneOffsetSec(start, zone);
+  return off2 === off ? start : startLocal - off2;
+}
+
+// 文案用的偏移标签：该时刻的 GMT±H（含半小时区，如 GMT+5:30）。
+// 用偏移而不是 IANA 名：文案要显示「现在时区：GMT+N」，跨 DST 时也以当前偏移为准
+function zoneGmtLabel(tsSec, zone) {
+  const off = zoneOffsetSec(tsSec, zone);
+  const abs = Math.abs(off);
+  const h = Math.floor(abs / 3600), mi = Math.floor((abs % 3600) / 60);
+  return `GMT${off >= 0 ? '+' : '-'}${h}${mi ? ':' + pad2(mi) : ''}`;
+}
+
+// 某一刻的偏移标签：UTC+08:00
+function zoneOffsetLabel(tsSec, zone) {
+  const off = zoneOffsetSec(tsSec, zone);
+  const abs = Math.abs(off);
+  return `UTC${off >= 0 ? '+' : '-'}${pad2(Math.floor(abs / 3600))}:${pad2(Math.floor((abs % 3600) / 60))}`;
+}
 
 function fmtCost(n) { return (parseFloat(n) || 0).toFixed(2); }
 
@@ -304,7 +440,7 @@ const PLATFORM_ERROR_CODES = { 40002: 'Session expired (Missing Token)', 40003: 
 async function fetchPlatformApi(sessionToken, cookie, proxy, path) {
   const { status, data } = await httpsRequest({
     hostname: 'platform.deepseek.com', path, method: 'GET',
-    headers: { Authorization: `Bearer ${sessionToken}`, Cookie: cookie || '', 'x-client-locale': 'zh_CN', 'x-client-platform': 'web', 'x-client-timezone-offset': '28800', 'x-client-version': '1.0.0', Referer: 'https://platform.deepseek.com/usage', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/149.0.0.0 Safari/537.36' },
+    headers: { Authorization: `Bearer ${sessionToken}`, Cookie: cookie || '', 'x-client-locale': 'zh_CN', 'x-client-platform': 'web', 'x-client-timezone-offset': String(zoneOffsetSec(Math.floor(Date.now() / 1000))), 'x-client-version': '1.0.0', Referer: 'https://platform.deepseek.com/usage', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/149.0.0.0 Safari/537.36' },
     proxy: proxy || undefined,
   });
   if (status === 401) throw new Error('Session expired');
@@ -319,12 +455,8 @@ async function fetchPlatformApi(sessionToken, cookie, proxy, path) {
   return json;
 }
 
-// 区间接口：显式 tz=28800，平台按 GMT+8 分桶返回原始小时桶。
-// 月接口只有请求头 x-client-timezone-offset，平台并不据此分桶（实际按 UTC），
-// 会让 GMT+8 00:00–08:00 的消费落到前一天 —— 所以优先走区间接口，月接口仅作兜底。
-function tz8DayStartSec(year, month, day) {
-  return Math.floor(Date.UTC(year, month - 1, day) / 1000) - TZ8_OFFSET_MS / 1000;
-}
+// 区间接口显式传 tz=<偏移秒>，平台按该偏移分桶并返回原始小时桶，本地再按逐时刻时区聚合。
+// 旧的月接口按 UTC 分桶（00:00–08:00 UTC+8 的消费会落到前一天），1.1.5 起已移除，不得回退。
 
 // ============================================================
 //  Time Range Presets —— 面板时间窗口
@@ -345,15 +477,17 @@ const SLOT_SEC = { hour: 3600, day: 86400 };
 // 窗口的可读区间：日粒度 '2026-09-01 ~ 2026-09-30'；小时粒度 '2026-09-27 00:00 ~ 24:00'
 function fmtRangeLabel(spec) {
   const ymd = (sec) => {
-    const d = new Date(sec * 1000 + TZ8_OFFSET_MS);
-    return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+    const p = zoneParts(sec);
+    return `${p.year}-${pad2(p.month)}-${pad2(p.day)}`;
   };
   if (spec.granularity === 'hour') {
-    const a = new Date(spec.startSec * 1000 + TZ8_OFFSET_MS);
-    const b = new Date(spec.endSec * 1000 + TZ8_OFFSET_MS);
-    return `${ymd(spec.startSec)} ${pad2(a.getUTCHours())}:00 ~ ${pad2(b.getUTCHours())}:00`;
+    const a = zoneParts(spec.startSec);
+    // 终点落在本地 00:00 时写 24:00，避免显示成与起点相同的 00:00
+    const endHour = zoneDayStartSec(spec.endSec) === spec.endSec ? 24 : zoneParts(spec.endSec).hour;
+    return `${ymd(spec.startSec)} ${pad2(a.hour)}:00 ~ ${pad2(endHour)}:00`;
   }
-  return `${ymd(spec.startSec)} ~ ${ymd(spec.endSec - 86400)}`;
+  const last = barMeta(spec, spec.slots - 1);
+  return `${ymd(spec.startSec)} ~ ${last.key}`;
 }
 
 function isPreset(id) { return RANGE_PRESET_DEFS.some((d) => d.id === id); }
@@ -363,55 +497,71 @@ function presetDef(id) {
 
 // 窗口区间为左闭右开 [startSec, endSec)。今天/近7天/近30天/本月的 end 落在未来
 // （官方用量页同样如此且平台接受）；渲染多少槽由 visibleSlotCount 决定，不裁剪请求。
+// 日粒度端点按日历日计算，不使用 ±86400 秒：DST 切换日的本地一天是 23/25 小时。
 // nowMs 可注入，便于对跨月、月初、月末等时刻做确定性测试。
 function resolveRange(id, nowMs) {
   const now = nowMs == null ? Date.now() : nowMs;
-  const t = new Date(now + TZ8_OFFSET_MS);
-  const y = t.getUTCFullYear(), mo = t.getUTCMonth() + 1, d = t.getUTCDate();
-  const todayStart = tz8DayStartSec(y, mo, d);
-  const monthStart = tz8DayStartSec(y, mo, 1);
+  const t = zoneParts(Math.floor(now / 1000));
+  const y = t.year, mo = t.month, d = t.day;
+  const todayStart = zoneDayStartSecOf(y, mo, d);
+  const tomorrowStart = zoneDayStartSecOf(y, mo, d + 1);
+  const monthStart = zoneDayStartSecOf(y, mo, 1);
   const def = presetDef(id);
   const mk = (startSec, endSec, granularity) => {
     const slotSec = SLOT_SEC[granularity];
     return { id: def.id, startSec, endSec, granularity, slotSec, slots: Math.round((endSec - startSec) / slotSec) };
   };
-  if (def.id === 'today') return mk(todayStart, todayStart + 86400, 'hour');
-  if (def.id === 'yesterday') return mk(todayStart - 86400, todayStart, 'hour');
-  if (def.id === 'last7') return mk(todayStart - 6 * 86400, todayStart + 86400, 'day');
-  if (def.id === 'last30') return mk(todayStart - 29 * 86400, todayStart + 86400, 'day');
+  if (def.id === 'today') return mk(todayStart, tomorrowStart, 'hour');
+  if (def.id === 'yesterday') return mk(zoneDayStartSecOf(y, mo, d - 1), todayStart, 'hour');
+  if (def.id === 'last7') return mk(zoneDayStartSecOf(y, mo, d - 6), tomorrowStart, 'day');
+  if (def.id === 'last30') return mk(zoneDayStartSecOf(y, mo, d - 29), tomorrowStart, 'day');
   if (def.id === 'lastMonth') {
     const prev = new Date(Date.UTC(y, mo - 2, 1));   // mo-2：JS 月份从 0 起算，减 2 即上一月
-    return mk(tz8DayStartSec(prev.getUTCFullYear(), prev.getUTCMonth() + 1, 1), monthStart, 'day');
+    return mk(zoneDayStartSecOf(prev.getUTCFullYear(), prev.getUTCMonth() + 1, 1), monthStart, 'day');
   }
   const daysInMonth = new Date(Date.UTC(y, mo, 0)).getUTCDate();
-  return mk(monthStart, tz8DayStartSec(y, mo, daysInMonth) + 86400, 'day');
+  return mk(monthStart, zoneDayStartSecOf(y, mo, daysInMonth + 1), 'day');
 }
 
-// 绝对秒 → 所属槽的绝对秒。小时槽与 UTC 整点对齐（+08:00 恰为整小时）；
-// 日槽必须按 GMT+8 日界：floor(ts/86400) 会按 UTC 分桶，即已修复过的 8 小时偏差。
+// 绝对秒 → 所属槽的绝对秒，按当前时区对齐：
+// 小时槽取该时区的整点（+05:30 这类偏移也对齐本地整点）；
+// 日槽取该时区的日界（按 UTC 分桶会产生固定 8 小时偏差，已在 1.1.5 修复过）。
 function slotStartSec(tsSec, granularity) {
-  if (granularity === 'hour') return Math.floor(tsSec / 3600) * 3600;
-  return Math.floor((tsSec + TZ8_OFFSET_MS / 1000) / 86400) * 86400 - TZ8_OFFSET_MS / 1000;
+  if (granularity === 'hour') return zoneHourStartSec(tsSec);
+  return zoneDayStartSec(tsSec);
 }
 
-// 可见槽数 = 已过去的槽 + 当前槽（"只画到今天/当前小时"，六种预设通用）
+// 可见槽数 = 已过去的槽 + 当前槽（"只画到今天/当前小时"，六种预设通用）。
+// 日粒度按日历日差计算：DST 切换日的本地一天不是 86400 秒，秒差除法会少算/多算一根。
 function visibleSlotCount(spec, nowMs) {
   const nowSec = Math.floor((nowMs == null ? Date.now() : nowMs) / 1000);
-  const elapsed = Math.floor((nowSec - spec.startSec) / spec.slotSec) + 1;
+  if (nowSec < spec.startSec) return 0;
+  if (nowSec >= spec.endSec) return spec.slots;
+  let elapsed;
+  if (spec.granularity === 'hour') {
+    elapsed = Math.floor((nowSec - spec.startSec) / spec.slotSec) + 1;
+  } else {
+    const a = zoneParts(spec.startSec), b = zoneParts(nowSec);
+    const days = Math.round((Date.UTC(b.year, b.month - 1, b.day) - Date.UTC(a.year, a.month - 1, a.day)) / 86400000);
+    elapsed = days + 1;
+  }
   return Math.max(0, Math.min(spec.slots, elapsed));
 }
 
-// 窗口是否已覆盖"本月 1 日 → 现在"：为真时本月快照可复用窗口数据，省一次请求
+// 窗口是否恰好从本月 1 日 00:00 开始：此时窗口合计即"本月至今"合计，可复用而不另取数。
+// 起点早于本月 1 日（近 7 / 30 天跨越上月末）时窗口合计包含上月金额，不能复用。
 function coversMonthToDate(spec, nowMs) {
   if (spec.granularity !== 'day') return false;
   const now = nowMs == null ? Date.now() : nowMs;
-  const t = new Date(now + TZ8_OFFSET_MS);
-  const monthStart = tz8DayStartSec(t.getUTCFullYear(), t.getUTCMonth() + 1, 1);
-  return spec.startSec <= monthStart && spec.endSec > Math.floor(now / 1000);
+  const t = zoneParts(Math.floor(now / 1000));
+  const monthStart = zoneDayStartSecOf(t.year, t.month, 1);
+  return spec.startSec === monthStart && spec.endSec > Math.floor(now / 1000);
 }
 
 async function fetchUsageRange(sessionToken, cookie, proxy, startSec, endSec) {
-  const q = `?start=${startSec}&end=${endSec}&tz=28800`;
+  // tz = 窗口起点对应的偏移秒（东正西负）：跨 DST 的窗口平台按起点偏移分桶，
+  // 但返回的是绝对时间的小时桶，本地仍按逐时刻的时区换算聚合
+  const q = `?start=${startSec}&end=${endSec}&tz=${zoneOffsetSec(startSec)}`;
   const [amount, cost] = await Promise.all([
     fetchPlatformApi(sessionToken, cookie, proxy, `/api/v0/usage/by_api_key/amount${q}`),
     fetchPlatformApi(sessionToken, cookie, proxy, `/api/v0/usage/by_api_key/cost${q}`),
@@ -477,34 +627,91 @@ function bucketCost(usage, bucket) {
 
 // 取 series 列表：amount 直接在 biz_data.series；cost 多套一层 —— biz_data.data = [{currency, series}]。
 // 两种形状都收进来，避免接口再调整时又整条链路失效。
-function seriesOf(apiJson) {
+// 余额：balance_infos 每项一个币种，全部读进来（不做汇率换算，多币种逐项展示）
+function parseBalanceItems(balance) {
+  const infos = (balance && Array.isArray(balance.balance_infos)) ? balance.balance_infos : [];
+  const items = [];
+  for (const info of infos) {
+    if (!info) continue;
+    const currency = String(info.currency || '').toUpperCase();
+    const num = (v) => (Number.isFinite(parseFloat(v)) ? parseFloat(v) : 0);
+    if (!currency && !num(info.total_balance)) continue;
+    items.push({ currency, total: num(info.total_balance), toppedUp: num(info.topped_up_balance), granted: num(info.granted_balance) });
+  }
+  return items;
+}
+
+// 账号概览（/api/v0/users/get_user_summary）→ 累计消费按币种返回（金额是字符串）
+// 业务层失败时 biz_data 为 null（顶层 code 仍可能是 0），不能当作"累计为 0"
+function hasSummaryData(json) {
+  return !!(json && json.data && json.data.biz_data);
+}
+function parseTotalCosts(json) {
+  const biz = json && json.data && json.data.biz_data;
+  const list = (biz && Array.isArray(biz.total_costs)) ? biz.total_costs : [];
+  const out = [];
+  for (const it of list) {
+    if (!it) continue;
+    const currency = String(it.currency || '').toUpperCase();
+    const amount = parseFloat(it.amount);
+    if (!Number.isFinite(amount)) continue;
+    out.push({ currency, amount });
+  }
+  out.sort((a, b) => (a.currency < b.currency ? -1 : a.currency > b.currency ? 1 : 0));
+  return out;
+}
+
+// 区间响应 → 按币种分组：[{currency, series}]。amount 侧不带币种（''），cost 侧每组一个币种
+function seriesGroups(apiJson) {
   const biz = apiJson && apiJson.data && apiJson.data.biz_data;
   if (!biz) return [];
-  const out = [];
+  const groups = [];
   for (const g of (Array.isArray(biz) ? biz : [biz])) {
     if (!g) continue;
-    if (Array.isArray(g.series)) out.push(...g.series);
+    if (Array.isArray(g.series)) groups.push({ currency: '', series: g.series });
     const inner = Array.isArray(g.data) ? g.data : (g.data ? [g.data] : []);
-    for (const sub of inner) if (sub && Array.isArray(sub.series)) out.push(...sub.series);
+    for (const sub of inner) {
+      if (sub && Array.isArray(sub.series)) groups.push({ currency: String(sub.currency || '').toUpperCase(), series: sub.series });
+    }
   }
-  return out;
+  return groups;
+}
+
+// 不分币种汇总 series（请求次数 / Tokens 与币种无关，用得到）
+function seriesOf(apiJson) {
+  return seriesGroups(apiJson).reduce((acc, g) => acc.concat(g.series), []);
+}
+
+// 展示用币种：优先账户主币种（余额第一项），不在用量里就取用量里的第一个
+function pickDisplayCurrency(balItems, agg) {
+  const list = (agg && Array.isArray(agg.currencies)) ? agg.currencies : [];
+  const primary = (Array.isArray(balItems) && balItems[0] && balItems[0].currency) || '';
+  if (primary && list.indexOf(primary) >= 0) return primary;
+  return list[0] || '';
 }
 
 // 槽 → 展示元数据（date/label/tipHead 是唯一出现日期字符串的地方）
 function barMeta(spec, idx) {
-  const slotSec = spec.startSec + idx * spec.slotSec;
-  const d = new Date(slotSec * 1000 + TZ8_OFFSET_MS);
-  const date = `${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
-  const ymd = `${d.getUTCFullYear()}-${date}`;
+  // 日粒度按日历日推进：跨 DST 时 start + idx*86400 可能落在前一天的 23:00 或当天的 01:00
+  let slotSec;
   if (spec.granularity === 'hour') {
-    const hh = d.getUTCHours();
+    slotSec = spec.startSec + idx * spec.slotSec;
+  } else {
+    const s = zoneParts(spec.startSec);
+    slotSec = zoneDayStartSecOf(s.year, s.month, s.day + idx);
+  }
+  const d = zoneParts(slotSec);
+  const date = `${pad2(d.month)}-${pad2(d.day)}`;
+  const ymd = `${d.year}-${date}`;
+  if (spec.granularity === 'hour') {
+    const hh = d.hour;
     const from = `${pad2(hh)}:00`;
     const to = hh === 23 ? '24:00' : `${pad2(hh + 1)}:00`;   // 末槽写 24:00，避免被读成次日 00:00
     return { kind: 'hour', key: `${ymd}T${pad2(hh)}`, date, hour: hh, from, to,
       label: [from], tipHead: `${date} ${from}–${to}` };   // 轴刻度只写起点（与官方一致），区间留给浮层
   }
-  return { kind: 'day', key: ymd, date, day: d.getUTCDate(),
-    label: [`${d.getUTCMonth() + 1}/${d.getUTCDate()}`], tipHead: ymd };
+  return { kind: 'day', key: ymd, date, day: d.day,
+    label: [`${d.month}/${d.day}`], tipHead: ymd };
 }
 
 // 区间响应 → 窗口聚合。索引使用"绝对秒槽下标"，不使用日期字符串，
@@ -520,11 +727,13 @@ function aggregateUsageRange(amountJson, costJson, spec, nowMs) {
     let byModel = slotMap.get(idx);
     if (!byModel) { byModel = new Map(); slotMap.set(idx, byModel); }
     let c = byModel.get(model);
-    if (!c) { c = { cacheHit: 0, cacheMiss: 0, output: 0, requests: 0, cost: 0 }; byModel.set(model, c); }
+    if (!c) { c = { cacheHit: 0, cacheMiss: 0, output: 0, requests: 0, costBy: {} }; byModel.set(model, c); }
     return c;
   };
   const absorb = (json, isCost) => {
-    for (const series of seriesOf(json)) {
+    // cost 侧按币种分组：金额记到各自币种名下，绝不跨币种相加（请求次数 / Tokens 与币种无关）
+    for (const group of seriesGroups(json)) {
+    for (const series of group.series) {
       const model = series.model || 'unknown';
       for (const b of series.buckets || []) {
         const ts = bucketSecOf(b.time);
@@ -537,7 +746,8 @@ function aggregateUsageRange(amountJson, costJson, spec, nowMs) {
           if (ts < spec.startSec || ts >= spec.endSec) continue;               // 认得出金额但不在窗口内：只用于结构判定
           const ci = Math.round((slotStartSec(ts, spec.granularity) - spec.startSec) / spec.slotSec);
           if (ci < 0 || ci >= visible) continue;
-          cellAt(ci, model).cost += c;
+          const cell = cellAt(ci, model);
+          cell.costBy[group.currency] = (cell.costBy[group.currency] || 0) + c;
         } else {
           if (ts < spec.startSec || ts >= spec.endSec) continue;               // 左闭右开；平台溢出桶丢弃
           const idx = Math.round((slotStartSec(ts, spec.granularity) - spec.startSec) / spec.slotSec);
@@ -548,6 +758,7 @@ function aggregateUsageRange(amountJson, costJson, spec, nowMs) {
         }
       }
     }
+    }
   };
   absorb(amountJson, false);
   absorb(costJson, true);
@@ -557,9 +768,10 @@ function aggregateUsageRange(amountJson, costJson, spec, nowMs) {
   for (const byModel of slotMap.values()) {
     for (const [model, c] of byModel) {
       let m = modelMap.get(model);
-      if (!m) { m = { model, cacheHit: 0, cacheMiss: 0, output: 0, cost: 0, requests: 0 }; modelMap.set(model, m); }
+      if (!m) { m = { model, cacheHit: 0, cacheMiss: 0, output: 0, requests: 0, costBy: {} }; modelMap.set(model, m); }
       m.cacheHit += c.cacheHit; m.cacheMiss += c.cacheMiss; m.output += c.output;
-      m.requests += c.requests; m.cost += c.cost;
+      m.requests += c.requests;
+      for (const cur of Object.keys(c.costBy)) m.costBy[cur] = (m.costBy[cur] || 0) + c.costBy[cur];
     }
   }
   const models = [...modelMap.values()].filter((m) => m.cacheHit + m.cacheMiss + m.output + m.requests > 0);
@@ -568,15 +780,36 @@ function aggregateUsageRange(amountJson, costJson, spec, nowMs) {
   for (let i = 0; i < visible; i++) {
     const byModel = slotMap.get(i) || new Map();
     // parts 按 models 顺序排列：颜色与浮层行序都依赖它，不能按金额排序
-    const parts = modelOrder.filter((m) => byModel.has(m) && byModel.get(m).cost > 0)
-      .map((m) => ({ model: m, cost: byModel.get(m).cost }));
-    let tokens = 0;
-    for (const c of byModel.values()) tokens += c.cacheHit + c.cacheMiss + c.output;
-    bars.push(Object.assign(barMeta(spec, i), { cost: parts.reduce((sum, p) => sum + p.cost, 0), tokens, parts }));
+    // parts 同时带三种口径（消费 / 请求 / Tokens）：三条柱状图各取自己那一列。
+    // 只要任一口径 > 0 就保留，否则「有请求没消费」的模型会在请求图里凭空消失；
+    // 消费图里它的高度是 0，本来就看不见，浮层也按各口径自行过滤
+    const parts = modelOrder.filter((m) => {
+      const c = byModel.get(m);
+      return c && (Object.keys(c.costBy).length || c.requests > 0 || c.cacheHit + c.cacheMiss + c.output > 0);
+    }).map((m) => {
+      const c = byModel.get(m);
+      const costBy = {};
+      for (const cur of Object.keys(c.costBy)) if (c.costBy[cur] > 0) costBy[cur] = c.costBy[cur];
+      // tokens 的三个分项随 parts 一起下发：Tokens 图的浮层要显示命中 / 未命中 / 输出与命中率
+      return { model: m, costBy, requests: c.requests, tokens: c.cacheHit + c.cacheMiss + c.output,
+        cacheHit: c.cacheHit, cacheMiss: c.cacheMiss, output: c.output };
+    });
+    let tokens = 0, requests = 0, cacheHit = 0, cacheMiss = 0, output = 0;
+    for (const c of byModel.values()) {
+      tokens += c.cacheHit + c.cacheMiss + c.output; requests += c.requests;
+      cacheHit += c.cacheHit; cacheMiss += c.cacheMiss; output += c.output;
+    }
+    // 每根柱子带各币种合计（消费图按所选币种取这一列）
+    const barCostBy = {};
+    for (const p of parts) for (const cur of Object.keys(p.costBy)) barCostBy[cur] = (barCostBy[cur] || 0) + p.costBy[cur];
+    bars.push(Object.assign(barMeta(spec, i), { costBy: barCostBy, tokens, requests, cacheHit, cacheMiss, output, parts }));
   }
+  // 币种列表与各币种合计：多币种时面板据此出「币种切换」，且各币种金额互不相加
+  const totalCostBy = {};
+  for (const m of models) for (const cur of Object.keys(m.costBy)) totalCostBy[cur] = (totalCostBy[cur] || 0) + m.costBy[cur];
+  const currencies = Object.keys(totalCostBy).filter((c) => totalCostBy[c] > 0).sort();
   return {
-    spec, granularity: spec.granularity, slots: spec.slots, visible, models, bars,
-    totalCost: models.reduce((sum, m) => sum + m.cost, 0),
+    spec, currencies, totalCostBy, granularity: spec.granularity, slots: spec.slots, visible, models, bars,
     totalTokens: models.reduce((sum, m) => sum + m.cacheHit + m.cacheMiss + m.output, 0),
     totalReqs: models.reduce((sum, m) => sum + m.requests, 0),
   };
@@ -606,6 +839,14 @@ function sanitizeBgValue(raw) {
 }
 
 function bgDirPath(context) { return path.join(context.globalStorageUri.fsPath, BG_DIR_NAME); }
+
+// 文件对话框的默认目录：给 file: 方案的 defaultUri 时 VSCode 才会弹客户端原生对话框；
+// 不给的话远程窗口会按窗口默认（远端工作区）打开远端目录
+function localDialogDir() {
+  const pics = path.join(os.homedir(), 'Pictures');
+  try { if (fs.statSync(pics).isDirectory()) return pics; } catch (e) { /* 没有就退回主目录 */ }
+  return os.homedir();
+}
 
 // 只保留基名，滤掉目录分隔符、控制字符与其它符号；Unicode 字母数字（含中文）保留，
 // 否则 两个jpg文件会同时被抹成 __.jpg，落成同一个文件、同一个 webview URL
@@ -658,13 +899,25 @@ function resolveBackground(context, webview) {
 // 模型名到颜色的最终映射只在宿主计算（chartColorMap），面板查表，避免重复计算
 
 const CHART_COLOR_MODES = ['official', 'model', 'mono'];
-const CHART_STATE_KEYS = {
+// 三张柱状图（消费金额 / API 请求次数 / Tokens）各自一套配色，互不影响；
+// 官方色阶按图区分，同一模型在不同图里的颜色因此可能不同
+const CHART_METRICS = ['cost', 'requests', 'tokens'];
+const CHART_COLORS_KEY = 'deepseekUsage.chartColors';   // { cost|requests|tokens: {mode, modelColors, baseColor} }
+// 2.2.0 及以前只有一套配色，语义上就是「消费金额」图：只读兼容，不再写入
+const CHART_LEGACY_KEYS = {
   mode: 'deepseekUsage.chartColorMode',
   modelColors: 'deepseekUsage.chartModelColors',
   baseColor: 'deepseekUsage.chartBaseColor',
 };
 const CHART_COLOR_DEFAULT = '#FFAA00';   // 官方色阶首色，同时作为单主色模式的默认主色
-const OFFICIAL_COST_COLORS = ['#FFAA00', '#FF8800', '#FF5500', '#FFCC66', '#CC4400', '#994400'];
+// 官方色阶（从官网用量页图表的 SVG 里直接采样柱子填充色，按叠放顺序自下而上）：
+// 三张图的主题色本就不同 —— 消费金额是橙→黄梯度，Tokens 是蓝色梯度；
+// API 请求次数官网是单序列单色（#70B2FE），这里同色系补两档以支持按模型叠加
+const OFFICIAL_COLORS = {
+  cost: ['#FF5500', '#FF8800', '#FFAA00', '#FED400', '#FEF24C'],
+  requests: ['#70B2FE', '#0C70F3', '#A0DCFD'],
+  tokens: ['#0C70F3', '#60B3FE', '#A0DCFD'],
+};
 
 function sanitizeChartColor(raw) {
   const s = String(raw == null ? '' : raw).trim();
@@ -718,31 +971,60 @@ function colorLadder(base, count) {
   return out;
 }
 
-function resolveChartConfig(context) {
-  const gs = context.globalState;
-  const modeRaw = String(gs.get(CHART_STATE_KEYS.mode, '') || '');
-  const mode = CHART_COLOR_MODES.indexOf(modeRaw) >= 0 ? modeRaw : 'official';
-  const rawMap = gs.get(CHART_STATE_KEYS.modelColors, {});
+// 单张图的配色配置：模式只认白名单，颜色只认 hex，越界一律回落
+function sanitizeChartConfig(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const modeRaw = String(src.mode || '');
   const modelColors = {};
+  const rawMap = src.modelColors;
   if (rawMap && typeof rawMap === 'object') {
     for (const key of Object.keys(rawMap)) {
       const c = sanitizeChartColor(rawMap[key]);
       if (c) modelColors[String(key)] = c;
     }
   }
-  return { mode, modelColors, baseColor: sanitizeChartColor(gs.get(CHART_STATE_KEYS.baseColor, '')) || CHART_COLOR_DEFAULT };
+  return {
+    mode: CHART_COLOR_MODES.indexOf(modeRaw) >= 0 ? modeRaw : 'official',
+    modelColors,
+    baseColor: sanitizeChartColor(src.baseColor) || CHART_COLOR_DEFAULT,
+  };
 }
 
-// 模型名 → 颜色。单一主色或按模型指定时未覆盖的模型回落到官方色阶
-function chartColorMap(context, models) {
-  const cfg = resolveChartConfig(context);
+// 三张图的配置来自设置项 chartColors（随 Settings Sync / 配置导出迁移）。
+// 老版本存在 globalState 里（三图对象或更早的单一配置）：没有该设置项时由 legacySrc 回退提供，
+// 激活时会一次性迁移进设置项并清掉老状态，避免两处真源
+function resolveChartConfigs(rawCfg, legacySrc) {
+  const raw = (rawCfg && typeof rawCfg === 'object' && !Array.isArray(rawCfg)) ? rawCfg : null;
+  const legacy = sanitizeChartConfig(legacySrc || null);
+  const out = {};
+  CHART_METRICS.forEach((metric) => {
+    if (raw && raw[metric]) { out[metric] = sanitizeChartConfig(raw[metric]); return; }
+    out[metric] = (!raw && metric === 'cost') ? legacy : sanitizeChartConfig(null);
+  });
+  return out;
+}
+
+// 三张图各自的「模型名 → 颜色」表：面板只查表，不在前端重算
+function chartColorsAll(cfgs, models) {
+  const out = {};
+  CHART_METRICS.forEach((metric) => { out[metric] = chartColorMap(cfgs[metric], models, metric); });
+  return out;
+}
+
+function officialPalette(metric) {
+  return OFFICIAL_COLORS[CHART_METRICS.indexOf(metric) >= 0 ? metric : 'cost'];
+}
+
+// 模型名 → 颜色。单一主色或按模型指定时未覆盖的模型回落到该图自己的官方色阶
+function chartColorMap(cfg, models, metric) {
+  const palette = officialPalette(metric);
   const list = Array.isArray(models) ? models : [];
   const ladder = cfg.mode === 'mono' ? colorLadder(cfg.baseColor, list.length) : [];
   const map = {};
   list.forEach((name, i) => {
     if (cfg.mode === 'model' && cfg.modelColors[name]) map[name] = cfg.modelColors[name];
     else if (cfg.mode === 'mono' && ladder[i]) map[name] = ladder[i];
-    else map[name] = OFFICIAL_COST_COLORS[i % OFFICIAL_COST_COLORS.length];
+    else map[name] = palette[i % palette.length];
   });
   return map;
 }
@@ -760,9 +1042,12 @@ const CONFIG_FILE_APP = 'deepseek-usage-monitor';
 const CONFIG_FILE_VERSION = 1;
 const CONFIG_SETTING_KEYS = [
   'language', 'statusBar.items', 'statusBar.label', 'statusBar.closeWhenActive', 'refreshInterval',
-  'dashboard.backgroundColor', 'dashboard.backgroundDim',
+  'charts.items', 'timezone', 'chartColors',
+  'dashboard.backgroundColor', 'dashboard.backgroundDim', 'dashboard.cardOpacity', 'dashboard.fontScale',
 ];
-const CONFIG_STATE_KEYS = [PRESET_STATE_KEY, CHART_STATE_KEYS.mode, CHART_STATE_KEYS.modelColors, CHART_STATE_KEYS.baseColor];
+// 导出只写新键；老键留在白名单里，是为了还能读入 2.2.0 之前导出的配置文件
+const CONFIG_STATE_KEYS = [PRESET_STATE_KEY, CHART_COLORS_KEY,
+  CHART_LEGACY_KEYS.mode, CHART_LEGACY_KEYS.modelColors, CHART_LEGACY_KEYS.baseColor];
 const SB_ITEM_IDS = ['todayCost', 'monthCost', 'balance', 'todayTokens'];
 const SB_LABEL_DEFAULT = 'DeepSeek Usage';   // 状态栏显示的名称；可由 statusBar.label 覆盖，留空则不显示
 const SB_LABEL_MAX = 64;                     // 名称长度上限（防止把状态栏挤爆；配置导入时也按此校验）
@@ -782,6 +1067,21 @@ function sanitizeConfigSetting(shortKey, value) {
       if (!Array.isArray(value)) return undefined;
       return Array.from(new Set(value.filter((v) => SB_ITEM_IDS.indexOf(v) >= 0)));
     }
+    case 'charts.items': {
+      if (!Array.isArray(value)) return undefined;
+      return Array.from(new Set(value.filter((v) => CHART_METRICS.indexOf(v) >= 0)));
+    }
+    case 'timezone': {
+      const raw = String(value == null ? '' : value).trim();
+      if (!raw) return '';                                    // 空 = 跟随客户端
+      return normalizeZone(raw) || undefined;                 // 认不出来就不导入
+    }
+    case 'chartColors': {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+      const out = {};
+      CHART_METRICS.forEach((metric) => { if (value[metric]) out[metric] = sanitizeChartConfig(value[metric]); });
+      return Object.keys(out).length ? out : undefined;
+    }
     case 'statusBar.label': {
       const s = String(value == null ? '' : value).replace(/[\r\n\t]+/g, ' ').trim();
       return s.length > SB_LABEL_MAX ? undefined : s;   // 空串合法（= 不显示名称）
@@ -800,6 +1100,14 @@ function sanitizeConfigSetting(shortKey, value) {
       const n = Number(value);
       return Number.isFinite(n) && n >= 0 && n <= BG_DIM_MAX ? Math.round(n * 100) / 100 : undefined;
     }
+    case 'dashboard.cardOpacity': {
+      const n = Number(value);
+      return Number.isFinite(n) && n >= BG_CARD_OPACITY_MIN && n <= 1 ? Math.round(n * 100) / 100 : undefined;
+    }
+    case 'dashboard.fontScale': {
+      const n = Number(value);
+      return Number.isFinite(n) && n >= 0.8 && n <= 1.4 ? Math.round(n * 100) / 100 : undefined;
+    }
     default:
       return undefined;
   }
@@ -807,9 +1115,15 @@ function sanitizeConfigSetting(shortKey, value) {
 
 function sanitizeConfigState(key, value) {
   if (key === PRESET_STATE_KEY) return isPreset(String(value || '')) ? String(value) : undefined;
-  if (key === CHART_STATE_KEYS.mode) return CHART_COLOR_MODES.indexOf(String(value)) >= 0 ? String(value) : undefined;
-  if (key === CHART_STATE_KEYS.baseColor) return sanitizeChartColor(value) || undefined;
-  if (key === CHART_STATE_KEYS.modelColors) {
+  if (key === CHART_COLORS_KEY) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const out = {};
+    CHART_METRICS.forEach((metric) => { if (value[metric]) out[metric] = sanitizeChartConfig(value[metric]); });
+    return Object.keys(out).length ? out : undefined;
+  }
+  if (key === CHART_LEGACY_KEYS.mode) return CHART_COLOR_MODES.indexOf(String(value)) >= 0 ? String(value) : undefined;
+  if (key === CHART_LEGACY_KEYS.baseColor) return sanitizeChartColor(value) || undefined;
+  if (key === CHART_LEGACY_KEYS.modelColors) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
     const out = {};
     for (const k of Object.keys(value)) {
@@ -825,13 +1139,40 @@ function sanitizeConfigState(key, value) {
 //  Webview HTML Generator — Canvas Charts Dashboard
 // ============================================================
 //
-// 数据不再拼进 HTML，只有面板创建和语言变化时才重建外壳，其余一律通过 postMessage 推送数据
+// 数据不写入 HTML：只有面板创建与语言变化时重建外壳，其余一律通过 postMessage 推送数据
 
 
-function buildPanelHtml(i18n, langCode, selectedPreset, bg) {
+// 三张柱状图的静态描述：外壳按「charts.items」的顺序与取舍生成对应卡片
+// （height 只影响外部尺寸，主图略高；id 与面板脚本的 CHART_DEFS 一一对应）
+// 三张图的官方色阶各不相同（消费金额为橙→黄梯度，Tokens 为蓝色梯度，请求次数为单色系），
+// 因此同一模型在不同图里的颜色不保证一致
+const CHART_SPECS = {
+  cost: { titleKey: 'costAmount', total: 'chartTotal', legend: 'costLegend', canvas: 'costChart', wrap: 'costWrap', btn: 'colorBtnCost', height: 260, currency: true },
+  requests: { titleKey: 'apiRequests', total: 'reqTotal', legend: 'reqLegend', canvas: 'reqChart', wrap: 'reqWrap', btn: 'colorBtnReq', height: 220 },
+  tokens: { titleKey: 'tokens', total: 'tokTotal', legend: 'tokLegend', canvas: 'tokChart', wrap: 'tokWrap', btn: 'colorBtnTok', height: 220 },
+};
+
+function buildPanelHtml(i18n, langCode, selectedPreset, bg, charts, fontScale) {
   const rangeOpts = RANGE_PRESET_DEFS
     .map((d) => `<option value="${d.id}"${d.id === selectedPreset ? ' selected' : ''}>${i18n[d.key]}</option>`).join('');
   const rangeIds = JSON.stringify(RANGE_PRESET_DEFS.map((d) => d.id));
+  // 图表卡片：顺序 = 配置顺序；未配置的图不生成（面板脚本对缺失的 canvas / 按钮都有判空）
+  const chartCards = (Array.isArray(charts) ? charts : CHART_METRICS).map((metric) => {
+    const sp = CHART_SPECS[metric];
+    if (!sp) return '';
+    // 只有消费金额图带「（币种）」与币种下拉
+    const currencyCtl = sp.currency
+      ? '<span class="cur" id="costCur"></span><select class="cur-select" id="curSelect" hidden></select>'
+      : '';
+    return `<div class="card chart-card" style="margin-top:12px">
+  <div class="card-head">
+    <div class="chart-title">${i18n[sp.titleKey]}${currencyCtl}<span class="chart-total" id="${sp.total}"></span></div>
+    <div class="legend" id="${sp.legend}"></div>
+    <button class="btn btn-light color-btn" id="${sp.btn}">${i18n.chartColorsBtn}</button>
+  </div>
+  <div class="chart-wrap" id="${sp.wrap}"><canvas id="${sp.canvas}" style="width:100%;height:${sp.height}px"></canvas></div>
+</div>`;
+  }).join('\n');
   const htmlLang = langCode === 'en' ? 'en' : 'zh-CN';   // <html lang> 跟随语言设置
 
   // 背景规则统一追加在 style 末尾：同特异性下后者生效，用于覆盖上面的 body 与 .card 底色
@@ -862,7 +1203,7 @@ function buildPanelHtml(i18n, langCode, selectedPreset, bg) {
   }
   const bgCss = bgRules.length ? '\n/* dashboard background */\n' + bgRules.join('\n') + '\n' : '';
 
-  return `<!DOCTYPE html><html lang="${htmlLang}">
+  const html = `<!DOCTYPE html><html lang="${htmlLang}">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>${i18n.title}</title>
 <style>
@@ -882,6 +1223,17 @@ h1{font-size:18px;font-weight:600}
 .card .label{font-size:11px;color:var(--vscode-editor-foreground);margin-bottom:6px}
 .card .value{display:inline-block;font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
 .card .suffix{font-size:11px;color:var(--vscode-descriptionForeground);margin-left:6px}
+/* 多币种账户：每个币种一组「数值 + 代码小字」，组间用 + 连接（不做符号映射，也不做汇率换算）*/
+.value-group{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 4px}
+.plus{color:var(--vscode-descriptionForeground);font-size:13px;align-self:center;margin:0 2px}
+.chart-title .cur{color:var(--vscode-descriptionForeground);font-size:12px;margin-left:3px}
+/* 多币种时的切换下拉：贴着「消费金额（币种）合计」右侧 */
+.chart-title .cur-select{margin-left:8px;padding:1px 4px;font-size:11px;border-radius:4px;cursor:pointer;color:var(--vscode-editor-foreground);background:var(--vscode-dropdown-background,var(--vscode-input-background));border:1px solid var(--vscode-widget-border,rgba(128,128,128,.35))}
+.chart-title .cur-select[hidden]{display:none}
+/* 首行消费统计卡的循环切换按钮（右上角）：今日 → 本月 → 累计 → 今日 */
+.cost-stat-card{position:relative}
+.cost-stat-cycle{position:absolute;top:10px;right:12px;padding:1px 6px;border:1px solid var(--vscode-widget-border,rgba(128,128,128,.35));border-radius:4px;background:var(--vscode-button-secondaryBackground,transparent);color:var(--vscode-descriptionForeground);font-size:12px;line-height:18px;cursor:pointer}
+.cost-stat-cycle:hover{color:var(--vscode-editor-foreground);background:var(--vscode-button-secondaryHoverBackground,var(--vscode-list-hoverBackground))}
 .card .suffix[hidden]{display:none}
 .card .sub{font-size:11px;color:var(--vscode-descriptionForeground);margin-top:4px}
 .card .sub[hidden]{display:none}
@@ -912,10 +1264,13 @@ h1{font-size:18px;font-weight:600}
 #chart-tip .tip-row{display:flex;justify-content:space-between;gap:18px;white-space:nowrap}
 #chart-tip .tip-row span:last-child{font-variant-numeric:tabular-nums}
 #chart-tip .tip-head{font-weight:600;padding-bottom:5px;margin-bottom:5px;border-bottom:1px solid var(--vscode-widget-border,rgba(128,128,128,.25))}
+#chart-tip .tip-model{margin-top:4px;font-weight:600}
+#chart-tip .tip-sub{padding-left:16px}
+#chart-tip .tip-sub span:first-child{color:var(--vscode-descriptionForeground)}
 #chart-tip .tip-dot{display:inline-block;width:7px;height:7px;border-radius:2px;margin-right:6px;vertical-align:middle}
 .chart-card{position:relative}
 .chart-card .card-head{padding-right:78px}   /* 给右上角的「配色」按钮让位，图例不会压到它 */
-.chart-card #colorBtn{position:absolute;top:12px;right:14px}
+.chart-card .color-btn{position:absolute;top:12px;right:14px}
 .color-panel{position:fixed;z-index:997;right:24px;top:56px;width:252px;padding:12px 14px;border-radius:6px;background:var(--ds-card-bg,var(--vscode-editorWidget-background,var(--vscode-input-background)));border:1px solid var(--vscode-widget-border,rgba(128,128,128,.25));box-shadow:0 6px 18px rgba(0,0,0,.35)}
 .color-panel[hidden]{display:none}
 .cp-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
@@ -936,7 +1291,7 @@ ${bgCss}</style></head>
     <button class="btn btn-light" id="settingsBtn">${i18n.settings}</button>
   </div>
 </div>
-<div class="subtitle">${i18n.tzNote}</div>
+<div class="subtitle" id="tzNote"></div>
 <div id="errBanner" class="banner" hidden></div>
 
 <div class="cards-2" id="topRow">
@@ -944,19 +1299,20 @@ ${bgCss}</style></head>
     <div class="card-row">
       <div style="min-width:0">
         <div class="label">${i18n.toppedUpBalance}</div>
-        <div class="value" id="topupValue">—</div><span class="suffix" id="topupSuffix" hidden>CNY</span>
+        <div class="value-group" id="topupValue"><span class="value">—</span></div>
       </div>
     </div>
     <div class="sub" id="topupSub"></div>
   </div>
-  <div class="card">
-    <div class="label">${i18n.todayCost}</div>
-    <div class="value" id="todayValue">—</div><span class="suffix" id="todaySuffix" hidden>CNY</span>
+  <div class="card cost-stat-card">
+    <div class="label" id="costStatLabel">${i18n.todayCost}</div>
+    <div class="value-group" id="todayValue"><span class="value">—</span></div>
     <div class="sub" id="todaySub"></div>
+    <button class="cost-stat-cycle" id="costStatCycle" title="${i18n.costCardSwitchHint}">⇄</button>
   </div>
   <div class="card" id="giftCard" hidden>
     <div class="label">${i18n.grantedBalance}</div>
-    <div class="value" id="giftValue">—</div><span class="suffix" id="giftSuffix" hidden>CNY</span>
+    <div class="value-group" id="giftValue"><span class="value">—</span></div>
   </div>
 </div>
 
@@ -976,7 +1332,7 @@ ${bgCss}</style></head>
 <div class="cards-3">
   <div class="card">
     <div class="label">${i18n.costAmount}</div>
-    <div class="value" id="mCost">—</div><span class="suffix" id="mCostSuffix" hidden>CNY</span>
+    <div class="value-group" id="mCost"><span class="value">—</span></div>
   </div>
   <div class="card">
     <div class="label">${i18n.apiRequests}</div>
@@ -988,14 +1344,7 @@ ${bgCss}</style></head>
   </div>
 </div>
 
-<div class="card chart-card" style="margin-top:12px">
-  <div class="card-head">
-    <div class="chart-title">${i18n.costCny}<span class="chart-total" id="chartTotal"></span></div>
-    <div class="legend" id="costLegend"></div>
-  </div>
-  <div class="chart-wrap" id="costWrap"><canvas id="costChart" style="width:100%;height:260px"></canvas></div>
-  <button class="btn btn-light" id="colorBtn">${i18n.chartColorsBtn}</button>
-</div>
+${chartCards}
 
 <div class="color-panel" id="colorPanel" hidden></div>
 
@@ -1005,24 +1354,41 @@ const vsc = acquireVsCodeApi();
 // 固定文案仅重建外壳时更新；运行期动态文案随数据一起推送更新
 var I18N = ${JSON.stringify(i18n).replace(/</g, '\\u003c')};
 var RANGE_IDS = ${rangeIds};
+var FONT_SCALE = ${Number.isFinite(fontScale) ? fontScale : 1};
 var D = null;                 // 最近一次由扩展推送的数据
-var busySafety = null;        // 刷新按钮的兜底解锁计时器
+var busySafety = null;        // 刷新按钮的超时解锁计时器（请求无响应时自动恢复）
 
 // 官方「消费金额」柱状图色阶（截图像素采样），由宿主注入；用于 D.colors 未覆盖的模型
-var COST_COLORS = ${JSON.stringify(OFFICIAL_COST_COLORS)};
+var OFFICIAL_COLORS = ${JSON.stringify(OFFICIAL_COLORS)};
+var TZ_DEFAULT = ${JSON.stringify(activeZone)};   // 外壳构建时的时区；数据到达后以载荷里的 tzZone 为准
+var TZ_LABEL = ${JSON.stringify(zoneGmtLabel(Math.floor(Date.now() / 1000), activeZone))};
 
 function i18n() { return (D && D.i18n) || I18N || {}; }
 function fmtCost(n) { return (parseFloat(n) || 0).toFixed(2); }
 function fmtInt(n) { return Math.round(parseFloat(n) || 0).toLocaleString('en-US'); }
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function p2(n) { return (n < 10 ? '0' : '') + n; }
-// 数据更新时间：面板所有时间统一按 GMT+8（与 tzNote 一致）。
-// short=true 用于正文（同一 GMT+8 日只给 HH:MM:SS，跨日带月-日），short=false 用于 title（完整 YYYY-MM-DD HH:MM:SS）
-function fmtClock8(ms, short) {
-  var t = new Date(ms + 8 * 3600 * 1000), now = new Date(Date.now() + 8 * 3600 * 1000);
-  var ymd = t.getUTCFullYear() + '-' + p2(t.getUTCMonth() + 1) + '-' + p2(t.getUTCDate());
-  var nowYmd = now.getUTCFullYear() + '-' + p2(now.getUTCMonth() + 1) + '-' + p2(now.getUTCDate());
-  var hms = p2(t.getUTCHours()) + ':' + p2(t.getUTCMinutes()) + ':' + p2(t.getUTCSeconds());
+// 数据更新时间：面板所有时间统一按当前时区（与 tzNote 一致）。
+// short=true 用于正文（同一时区日仅显示 HH:MM:SS，跨日带月-日），short=false 用于 title（完整 YYYY-MM-DD HH:MM:SS）
+// 面板侧时区：优先用载荷带来的（宿主已按设置/客户端时区解析），否则用外壳构建时的值
+function panelZone() { return (D && D.tzZone) || TZ_DEFAULT; }
+var zoneFmts = {};
+function zonePartsOf(ms) {
+  var zone = panelZone();
+  var f = zoneFmts[zone];
+  if (!f) {
+    f = new Intl.DateTimeFormat('en-US', { timeZone: zone, hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    zoneFmts[zone] = f;
+  }
+  var p = {};
+  f.formatToParts(new Date(ms)).forEach(function(it) { p[it.type] = it.value; });
+  return { year: p.year, month: p.month, day: p.day, hour: p.hour, minute: p.minute, second: p.second };
+}
+function fmtClock(ms, short) {
+  var t = zonePartsOf(ms), now = zonePartsOf(Date.now());
+  var ymd = t.year + '-' + t.month + '-' + t.day;
+  var nowYmd = now.year + '-' + now.month + '-' + now.day;
+  var hms = p2(Number(t.hour) % 24) + ':' + t.minute + ':' + t.second;
   if (!short) return ymd + ' ' + hms;
   return ymd === nowYmd ? hms : (ymd.slice(5) + ' ' + hms);
 }
@@ -1030,15 +1396,33 @@ function modelOrder() { return ((D && D.models) || []).map(function(m) { return 
 // 颜色必须由「模型在全局 models 中的序号」决定，不能由当日在 parts 里的下标决定，
 // 否则某天只有 model2、另一天只有 model1 时两者会同色
 // 颜色由宿主按配色设置算好（D.colors，已校验为 #hex）；缺失时回落官方色阶，避免出现 undefined
-function colorOf(model) {
-  var map = (D && D.colors) || {};
+// 配色按图各自查表：D.colors[metric] 由宿主算好，面板只取用
+function colorsFor(metric) { return ((D && D.colors) || {})[metric] || {}; }
+function officialPalette(metric) { return OFFICIAL_COLORS[metric] || OFFICIAL_COLORS.cost; }
+function colorOf(model, metric) {
+  var map = colorsFor(metric), palette = officialPalette(metric);
   if (map[model]) return map[model];
   var i = modelOrder().indexOf(model);
-  return COST_COLORS[(i >= 0 ? i : COST_COLORS.length - 1) % COST_COLORS.length];
+  return palette[(i >= 0 ? i : palette.length - 1) % palette.length];
+}
+// 模型在某个口径下的合计：图例按它过滤，口径与宿主聚合一致
+function modelMetric(m, metric) {
+  if (metric === 'requests') return Number(m.requests) || 0;
+  if (metric === 'tokens') return (Number(m.cacheHit) || 0) + (Number(m.cacheMiss) || 0) + (Number(m.output) || 0);
+  return Number((m.costBy || {})[usageCurrency()]) || 0;   // 消费金额按当前展示币种
+}
+function metricLabel(metric) {
+  var L = i18n();
+  if (metric === 'requests') return L.apiRequests;
+  if (metric === 'tokens') return L.tokens;
+  return L.costAmount;
 }
 
 // 配色设置：宿主已校验并算好最终颜色，这里只读
-function chartCfg() { return (D && D.chart) || { mode: 'official', modelColors: {}, baseColor: COST_COLORS[0] }; }
+function chartCfg(metric) {
+  var all = (D && D.chart) || {};
+  return all[metric] || { mode: 'official', modelColors: {}, baseColor: officialPalette(metric)[0] };
+}
 
 // input[type=color] 只接受 #rrggbb；把 3/4 位简写补全，带 alpha 的丢掉 alpha
 function toColorInput(v) {
@@ -1046,19 +1430,23 @@ function toColorInput(v) {
   if (/^#[0-9a-f]{3}$/i.test(s)) return '#' + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
   if (/^#[0-9a-f]{4}$/i.test(s)) return '#' + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
   if (/^#[0-9a-f]{8}$/i.test(s)) return s.slice(0, 7);
-  return /^#[0-9a-f]{6}$/i.test(s) ? s : COST_COLORS[0];
+  return /^#[0-9a-f]{6}$/i.test(s) ? s : officialPalette(colorPanelMetric)[0];
 }
 
 // 配色浮层：模式三选 +（按模型指定时）每个模型一个取色器 + 主色 + 恢复官方。
 // 元素逐个 createElement 并绑事件（面板无 CSP nonce，不使用内联 onclick）
+// 浮层一次只服务一张图：colorPanelMetric 记录当前图表（三张图的配色互不影响）
+var colorPanelMetric = 'cost';
+
 function renderColorPanel() {
   var el = document.getElementById('colorPanel'); if (!el) return;
-  var L = i18n(), cfg = chartCfg();
+  var metric = colorPanelMetric;
+  var L = i18n(), cfg = chartCfg(metric);
   el.innerHTML = '';
 
   var head = document.createElement('div'); head.className = 'cp-head';
   var title = document.createElement('div');
-  title.className = 'cp-title'; title.textContent = L.colorModeLabel;
+  title.className = 'cp-title'; title.textContent = L.chartColorsBtn + ' · ' + metricLabel(metric);
   var close = document.createElement('button');
   close.className = 'cp-close'; close.textContent = '✕'; close.title = L.colorClose;
   close.addEventListener('click', function() { el.hidden = true; });
@@ -1068,7 +1456,7 @@ function renderColorPanel() {
     var row = document.createElement('label'); row.className = 'cp-row';
     var radio = document.createElement('input');
     radio.type = 'radio'; radio.name = 'cpMode'; radio.value = m[0]; radio.checked = cfg.mode === m[0];
-    radio.addEventListener('change', function() { if (radio.checked) post('setChartColors', { mode: m[0] }); });
+    radio.addEventListener('change', function() { if (radio.checked) post('setChartColors', { metric: metric, mode: m[0] }); });
     var name = document.createElement('span'); name.textContent = m[1];
     row.appendChild(radio); row.appendChild(name); el.appendChild(row);
   });
@@ -1077,8 +1465,8 @@ function renderColorPanel() {
     modelOrder().forEach(function(model) {
       var row = document.createElement('label'); row.className = 'cp-row';
       var picker = document.createElement('input');
-      picker.type = 'color'; picker.className = 'cp-color'; picker.value = toColorInput(colorOf(model));
-      picker.addEventListener('change', function() { post('setChartColors', { model: model, color: picker.value }); });
+      picker.type = 'color'; picker.className = 'cp-color'; picker.value = toColorInput(colorOf(model, metric));
+      picker.addEventListener('change', function() { post('setChartColors', { metric: metric, model: model, color: picker.value }); });
       var name = document.createElement('span'); name.className = 'cp-name'; name.textContent = model;
       row.appendChild(picker); row.appendChild(name); el.appendChild(row);
     });
@@ -1086,7 +1474,7 @@ function renderColorPanel() {
     var row2 = document.createElement('label'); row2.className = 'cp-row';
     var base = document.createElement('input');
     base.type = 'color'; base.value = toColorInput(cfg.baseColor);
-    base.addEventListener('change', function() { post('setChartColors', { color: base.value }); });
+    base.addEventListener('change', function() { post('setChartColors', { metric: metric, color: base.value }); });
     var baseName = document.createElement('span'); baseName.textContent = L.colorBaseLabel;
     row2.appendChild(base); row2.appendChild(baseName); el.appendChild(row2);
   }
@@ -1150,96 +1538,184 @@ function fmtAxis(v) {
   if (v >= 1) return String(Math.round(v * 10) / 10);
   return v.toFixed(2);
 }
+// Tokens 轴用 K/M/B 缩写：原文过长会压缩绘图区宽度（官网也是 0 / 180M / 360M）
+function fmtAxisCompact(v) {
+  var abs = Math.abs(v);
+  if (!(abs > 0)) return '0';
+  var units = [[1e9, 'B'], [1e6, 'M'], [1e3, 'K']];
+  for (var i = 0; i < units.length; i++) {
+    if (abs >= units[i][0]) {
+      var n = abs / units[i][0];
+      return (n >= 100 ? Math.round(n) : Math.round(n * 10) / 10) + units[i][1];
+    }
+  }
+  return String(Math.round(abs));
+}
+function fmtAxisByMetric(metric, v) {
+  if (metric === 'tokens') return fmtAxisCompact(v);
+  if (metric === 'requests') return fmtInt(v);
+  return fmtAxis(v);
+}
 function drawEmpty(ctx, w, h, text) {
-  ctx.fillStyle = labelColor(); ctx.font = '12px sans-serif';
+  ctx.fillStyle = labelColor(); ctx.font = Math.round(12 * FONT_SCALE) + 'px sans-serif';
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.fillText(text || '', w / 2, h / 2);
   ctx.textBaseline = 'alphabetic';
 }
 
-// ===== DAILY COST STACKED BAR CHART =====
-var costBars = [];
+// ===== STACKED BAR CHARTS（消费 / 请求次数 / Tokens 三张，同色按模型叠加）=====
+// 三张图共用同一套绘制逻辑，只有取哪一列和轴标签格式不同；每张图按自己的
+// 配色配置取色（官方色阶按图区分，同一模型在不同图里的颜色可能不同）
+var CHART_DEFS = [
+  { canvas: 'costChart', wrap: 'costWrap', metric: 'cost', btn: 'colorBtnCost', legend: 'costLegend' },
+  { canvas: 'reqChart', wrap: 'reqWrap', metric: 'requests', btn: 'colorBtnReq', legend: 'reqLegend' },
+  { canvas: 'tokChart', wrap: 'tokWrap', metric: 'tokens', btn: 'colorBtnTok', legend: 'tokLegend' },
+];
 
-function tipHtml(b) {
-  var rows = '<div class="tip-row tip-head"><span>' + esc(b.tipHead || b.date) + '</span><span>¥' + fmtCost(b.cost) + '</span></div>';
+// 金额只跟货币代码，不用符号：CNY / JPY 都是 ¥，符号映射本身有歧义；
+// 代码取自接口返回的 currency 字段（余额与用量都是），不会猜错
+function moneyText(v, currency) {
+  return fmtCost(v) + (currency ? ' ' + currency : '');
+}
+function moneyPair(value, currency) {
+  return '<span class="value">' + fmtCost(value) + '</span>' + (currency ? '<span class="suffix">' + esc(currency) + '</span>' : '');
+}
+// 多币种账户：逐项列出并用 + 连接
+function moneyGroup(items) {
+  return (items || []).map(function(it) { return moneyPair(it.value, it.currency); }).join('<span class="plus">+</span>');
+}
+function setHtml(id, html) { var el = document.getElementById(id); if (el) el.innerHTML = html; }
+// 当前展示币种：默认取载荷提供的（账户主币种），用户在下拉里切换后以本地选择为准
+var panelCurrency = null;
+function usageCurrency() {
+  if (panelCurrency && D && Array.isArray(D.currencies) && D.currencies.indexOf(panelCurrency) >= 0) return panelCurrency;
+  return (D && D.currency) || '';
+}
+
+// 口径格式化：金额跟着币种代码，其余两个用千分位整数（与官网卡片、浮层一致）
+function fmtMetric(metric, v) {
+  return metric === 'cost' ? moneyText(v, usageCurrency()) : fmtInt(v);
+}
+// 一根柱子在某个口径下的值：消费金额按当前币种取，其余两个直接取数
+function barValue(bar, metric, currency) {
+  if (metric === 'cost') return Number((bar.costBy || {})[currency]) || 0;
+  return Number(bar[metric]) || 0;
+}
+function fmtPercent(hit, miss) {
+  var total = hit + miss;
+  return total > 0 ? (hit / total * 100).toFixed(1) + '%' : '—';
+}
+function tipSubRow(label, value) {
+  return '<div class="tip-row tip-sub"><span>' + esc(label) + '</span><span>' + value + '</span></div>';
+}
+function tipHtml(b, metric) {
+  var rows = '<div class="tip-row tip-head"><span>' + esc(b.tipHead || b.date) + '</span><span>' + fmtMetric(metric, barValue(b, metric, usageCurrency())) + '</span></div>';
+  if (metric === 'tokens') {
+    // Tokens 图：每个模型给出命中 / 未命中 / 输出与缓存命中率（命中率 = 命中 /（命中+未命中））
+    var L = i18n();
+    (b.parts || []).forEach(function(p) {
+      var total = Number(p.tokens) || 0;
+      if (total <= 0) return;
+      var hit = Number(p.cacheHit) || 0, miss = Number(p.cacheMiss) || 0, out = Number(p.output) || 0;
+      rows += '<div class="tip-row tip-model"><span><i class="tip-dot" style="background:' + colorOf(p.model, metric) + '"></i>' + esc(p.model) + '</span><span>' + fmtInt(total) + '</span></div>';
+      rows += tipSubRow(L.tokenCacheHit, fmtInt(hit));
+      rows += tipSubRow(L.tokenCacheMiss, fmtInt(miss));
+      rows += tipSubRow(L.tokenOutput, fmtInt(out));
+      rows += tipSubRow(L.tokenCacheRate, fmtPercent(hit, miss));
+    });
+    return rows;
+  }
   (b.parts || []).forEach(function(p) {
-    rows += '<div class="tip-row"><span><i class="tip-dot" style="background:' + colorOf(p.model) + '"></i>' + esc(p.model) + '</span><span>¥' + fmtCost(p.cost) + '</span></div>';
+    var v = metric === 'cost' ? (Number((p.costBy || {})[usageCurrency()]) || 0) : (Number(p[metric]) || 0);
+    if (v <= 0) return;   // 该口径为 0 的模型不在这一图里出现
+    rows += '<div class="tip-row"><span><i class="tip-dot" style="background:' + colorOf(p.model, metric) + '"></i>' + esc(p.model) + '</span><span>' + fmtMetric(metric, v) + '</span></div>';
   });
   return rows;
 }
 
-function drawCostBars(canvas, bars, granularity) {
+function drawBars(canvas, bars, metric) {
   try {
     var ctx = getCtx(canvas.id); if (!ctx) return;
     var w = canvas.cw, h = canvas.ch;
     if (w < 40 || h < 40) return;   // 面板不可见时 getBoundingClientRect 全 0，会让 slot 变成 NaN
 
-    var emptyText = !(D && D.hasCreds) ? i18n().noSessionToken : (D.error ? i18n().loadFailed : i18n().noDataRange);
-    if (!bars || !bars.length) { drawEmpty(ctx, w, h, emptyText); costBars = []; return; }
+    var emptyText = chartEmptyText();
+    if (!bars || !bars.length) { drawEmpty(ctx, w, h, emptyText); return; }
 
     var maxRaw = 0;
-    bars.forEach(function(b) { if (b.cost > maxRaw) maxRaw = b.cost; });
-    if (maxRaw <= 0) { drawEmpty(ctx, w, h, emptyText); costBars = []; return; }
+    bars.forEach(function(b) { var v = barValue(b, metric, usageCurrency()); if (v > maxRaw) maxRaw = v; });
+    if (maxRaw <= 0) { drawEmpty(ctx, w, h, emptyText); return; }
 
-    var pad = { top: 12, right: 16, bottom: 26, left: 52 };
+    var fs = function(n) { return Math.round(n * FONT_SCALE); };
+    var pad = { top: fs(12), right: fs(16), bottom: fs(26), left: fs(52) };
     var pw = w - pad.left - pad.right, ph = h - pad.top - pad.bottom;
     var n = bars.length, slot = pw / n;
     var barW = Math.max(2, Math.min(18, slot * 0.72));
     var max = niceMax(maxRaw), steps = 4;
 
     // y 轴网格与刻度
-    ctx.font = '10px sans-serif';
+    ctx.font = fs(10) + 'px sans-serif';
     for (var i = 0; i <= steps; i++) {
       var y = pad.top + ph * (1 - i / steps);
       drawHLine(ctx, w, y, undefined, pad.left, w - pad.right);
       ctx.fillStyle = labelColor(); ctx.textAlign = 'right';
-      ctx.fillText(fmtAxis(max * i / steps), pad.left - 6, y + 3);
+      ctx.fillText(fmtAxisByMetric(metric, max * i / steps), pad.left - fs(6), y + fs(3));
     }
 
     // 柱子 + 按模型堆叠（底部 = models[0]）
-    costBars = [];
+    var layout = [];
     bars.forEach(function(b, i) {
       var x = pad.left + i * slot + (slot - barW) / 2;
       var sy = pad.top + ph;
       var parts = b.parts || [];
       parts.forEach(function(p) {
-        var sh = ph * (p.cost / max);
+        var pv = metric === 'cost' ? (Number((p.costBy || {})[usageCurrency()]) || 0) : (Number(p[metric]) || 0);
+        var sh = ph * (pv / max);
         if (sh <= 0) return;
         sy -= sh;
-        ctx.fillStyle = colorOf(p.model);
+        ctx.fillStyle = colorOf(p.model, metric);
         ctx.fillRect(x, sy, barW, sh);
       });
-      costBars.push({ x: pad.left + i * slot, w: slot, bar: b });
+      layout.push({ x: pad.left + i * slot, w: slot, bar: b });
     });
 
     // x 轴刻度：柱数 < 4 时全部显示，否则最多 4 个 —— 在首末之间均匀取点（首末必有），单行标注。
     // 上限再受可用宽度约束，避免面板很窄时几个日期挤在一起
-    var maxLabels = Math.max(2, Math.min(4, Math.floor(pw / 110)));
+    var maxLabels = Math.max(2, Math.min(4, Math.floor(pw / fs(110))));
     var count = Math.min(n, maxLabels);
     var idxs = [];
     for (var li = 0; li < count; li++) {
       var ix2 = count === 1 ? 0 : Math.round(li * (n - 1) / (count - 1));
       if (idxs.indexOf(ix2) < 0) idxs.push(ix2);
     }
-    ctx.textAlign = 'center'; ctx.fillStyle = labelColor(); ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center'; ctx.fillStyle = labelColor(); ctx.font = fs(10) + 'px sans-serif';
     idxs.forEach(function(i2) {
       var labels = bars[i2].label || [];
       var cx = pad.left + i2 * slot + slot / 2;
-      for (var k = 0; k < labels.length; k++) ctx.fillText(labels[k], cx, pad.top + ph + 14 + k * 11);
+      for (var k = 0; k < labels.length; k++) ctx.fillText(labels[k], cx, pad.top + ph + fs(14) + k * fs(11));
     });
 
-    // 按格命中（31 根细柱按柱命中太难）
+    // 按格命中（31 根细柱的命中粒度过细）
     canvas.onmousemove = function(e) {
       var rect = canvas.getBoundingClientRect();
       if (!rect.width) return;
       var mx = (e.clientX - rect.left) * (canvas.cw / rect.width);
       if (mx < pad.left || mx > pad.left + pw) { hideChartTip(); return; }
       var idx = Math.floor((mx - pad.left) / slot);
-      if (idx < 0 || idx >= costBars.length) { hideChartTip(); return; }
-      showChartTip(e, tipHtml(costBars[idx].bar));
+      if (idx < 0 || idx >= layout.length) { hideChartTip(); return; }
+      showChartTip(e, tipHtml(layout[idx].bar, metric));
     };
     canvas.onmouseleave = hideChartTip;
-  } catch (e2) { console.error('drawCostBars:', e2); }
+  } catch (e2) { console.error('drawBars:', e2); }
+}
+
+// 图表空态文案：未取过数据时是「加载中」；仅在已获取过数据、确认未配置凭证时才提示去配置
+function chartEmptyText() {
+  var L = i18n();
+  if (!D || D.hasCreds == null) return L.loading || '';
+  if (D.hasCreds === false) return L.noSessionToken;
+  // 只有用量请求本身失败才说加载失败；余额等其它错误不应影响图表的空态
+  return (D.usageFailed || (D.usageFailed == null && D.error)) ? L.loadFailed : L.noDataRange;
 }
 
 // ===== RENDER =====
@@ -1256,59 +1732,100 @@ function render() {
 
   // 数据更新时间（刷新按钮左侧）；未成功取过数据时不显示
   if (d.updatedAt) {
-    setText('updatedAt', L.updatedAtLabel.replace('{0}', fmtClock8(d.updatedAt, true)));
-    document.getElementById('updatedAt').title = fmtClock8(d.updatedAt, false) + ' (GMT+8)';
+    setText('updatedAt', L.updatedAtLabel.replace('{0}', fmtClock(d.updatedAt, true)));
+    document.getElementById('updatedAt').title = fmtClock(d.updatedAt, false) + ' (' + ((D && D.tzLabel) || '') + ')';
   }
   show('updatedAt', !!d.updatedAt);
 
   // 卡A：充值余额（topped_up_balance，与官方「充值余额」同口径）
   // 赠送金额 > 0 时，今日消费右侧多一张「赠送金额」卡，首行由两列变三列
-  var hasGift = !!(d.hasBalance && d.bal && d.bal.granted > 0);
-  if (d.hasBalance && d.bal) {
-    setText('topupValue', '¥' + fmtCost(d.bal.toppedUp)); show('topupSuffix', true);
+  var balItems = (d.bal && Array.isArray(d.bal.items)) ? d.bal.items : [];
+  var hasGift = !!(d.hasBalance && d.bal) && balItems.some(function(it) { return (it.granted || 0) > 0; });
+  if (d.hasBalance && d.bal && balItems.length) {
+    setHtml('topupValue', moneyGroup(balItems.map(function(it) { return { value: it.toppedUp, currency: it.currency }; })));
     var subs = [];                                          // 赠送金额不在这里重复：单独有卡
     if (d.bal.insufficient) subs.push(L.balanceInsufficient);
     if (d.keyDegraded) subs.push(L.keySessionOnly);
     setText('topupSub', subs.join(' · '));          // 无内容时不占位（见 .sub[hidden]）
     show('topupSub', subs.length > 0);
   } else {
-    setText('topupValue', '—'); show('topupSuffix', false);
+    setHtml('topupValue', '<span class="value">—</span>');
     setText('topupSub', d.keyDegraded ? (L.errNoApiKey + ' · ' + L.keySessionOnly) : L.errNoApiKey);
     show('topupSub', true);
   }
-  if (hasGift) { setText('giftValue', '¥' + fmtCost(d.bal.granted)); show('giftSuffix', true); }
+  if (hasGift) {
+    setHtml('giftValue', moneyGroup(balItems
+      .filter(function(it) { return (it.granted || 0) > 0; })
+      .map(function(it) { return { value: it.granted, currency: it.currency }; })));
+  }
   show('giftCard', hasGift);
   var topRow = document.getElementById('topRow');
   if (topRow) topRow.className = hasGift ? 'cards-2 gift' : 'cards-2';   // 三张卡才配三列，否则留白
 
-  // 卡B：今日消费（始终表示今天，与图表所选窗口无关）
-  if (d.hasToday) {
-    setText('todayValue', '¥' + fmtCost(d.todayCost)); show('todaySuffix', true);
-    setText('todaySub', ''); show('todaySub', false);   // 无内容时不占位
+  // 卡B：消费统计（今日 / 本月 / 累计，由设置 costCard 决定；与图表所选窗口无关）
+  var costMode = d.costCard || 'today';
+  setText('costStatLabel', costMode === 'month' ? L.monthCostCard : (costMode === 'total' ? L.costCardTotal : L.todayCost));
+  if (costMode === 'total') {
+    // 累计：账号概览接口按币种返回，和余额卡一样逐项 + 连接
+    var totalItems = (d.totalCosts || []).map(function(it) { return { value: it.amount, currency: it.currency }; });
+    setHtml('todayValue', totalItems.length ? moneyGroup(totalItems) : '<span class="value">—</span>');
+    var totalSub = d.hasCreds === false ? L.noSessionToken : (d.hasTotal ? '' : L.loadFailed);
+    setText('todaySub', d.hasCreds == null ? (L.loading || '') : totalSub);
+    show('todaySub', !!(d.hasCreds == null || totalSub));
   } else {
-    setText('todayValue', '—'); show('todaySuffix', false);
-    setText('todaySub', !d.hasCreds ? L.noSessionToken : L.loadFailed);
-    show('todaySub', true);
+    var statVal = costMode === 'month' ? d.monthCost : d.todayCost;
+    var statHas = costMode === 'month' ? (d.monthCost != null) : !!d.hasToday;
+    setHtml('todayValue', statHas ? moneyPair(statVal, usageCurrency()) : '<span class="value">—</span>');
+    setText('todaySub', d.hasCreds == null ? (L.loading || '') : (d.hasCreds ? L.loadFailed : L.noSessionToken));
+    show('todaySub', !statHas || d.hasCreds == null);
   }
 
   // 三张指标卡
   if (d.hasUsage) {
-    setText('mCost', '¥' + fmtCost(d.totalCost)); show('mCostSuffix', true);
+    // 消费金额卡：多币种与账户余额一样逐项用 + 连接（各带自己的代码，不做汇率换算）
+    var costBy = d.totalCostBy || {};
+    var costItems = Object.keys(costBy).sort()
+      .filter(function(cur) { return (Number(costBy[cur]) || 0) > 0; })
+      .map(function(cur) { return { value: costBy[cur], currency: cur }; });
+    setHtml('mCost', costItems.length ? moneyGroup(costItems) : '<span class="value">0.00</span>');
     setText('mReqs', fmtInt(d.totalReqs));
     setText('mTokens', fmtInt(d.totalTokens));
   } else {
-    setText('mCost', '—'); show('mCostSuffix', false);
+    setHtml('mCost', '<span class="value">—</span>');
     setText('mReqs', '—'); setText('mTokens', '—');
   }
 
-  // 图表卡：合计 + 图例
-  setText('chartTotal', d.hasUsage ? '¥' + fmtCost(d.totalCost) : '');
-  var lg = '';
-  (d.models || []).forEach(function(m) {
-    if (!m.cost) return;
-    lg += '<span class="legend-item"><i class="legend-dot" style="background:' + colorOf(m.model) + '"></i>' + esc(m.model) + '</span>';
+  // 图表卡：合计 + 图例（三张图配色各自独立，图例也就各按各的颜色渲染）
+  var cur = usageCurrency();
+  setText('tzNote', (d.tzNote || ''));
+  setText('chartTotal', d.hasUsage ? moneyText((d.totalCostBy || {})[cur] || 0, cur) : '');
+  setText('costCur', cur ? String(L.currencyTag || ' ({0})').replace('{0}', cur) : '');
+  syncCurrencySelect();
+  setText('reqTotal', d.hasUsage ? fmtInt(d.totalReqs) : '');
+  setText('tokTotal', d.hasUsage ? fmtInt(d.totalTokens) : '');
+  CHART_DEFS.forEach(function(cd) {
+    var el = document.getElementById(cd.legend); if (!el) return;
+    var html = '';
+    (d.models || []).forEach(function(m) {
+      if (modelMetric(m, cd.metric) <= 0) return;
+      html += '<span class="legend-item"><i class="legend-dot" style="background:' + colorOf(m.model, cd.metric) + '"></i>' + esc(m.model) + '</span>';
+    });
+    el.innerHTML = html;
   });
-  document.getElementById('costLegend').innerHTML = lg;
+}
+
+// 币种下拉：窗口里出现多个币种时才显示，选项按载荷提供的列表（升序）
+function syncCurrencySelect() {
+  var sel = document.getElementById('curSelect'); if (!sel) return;
+  var list = (D && Array.isArray(D.currencies)) ? D.currencies : [];
+  if (list.length <= 1) { sel.hidden = true; sel.innerHTML = ''; return; }
+  var html = '';
+  list.forEach(function(cur) {
+    html += '<option value="' + esc(cur) + '">' + esc(cur) + '</option>';
+  });
+  sel.innerHTML = html;
+  sel.value = usageCurrency();
+  sel.hidden = false;
 }
 
 // 时间窗口下拉：选项静态内联在外壳里，这里只同步选中值，并挂上区间说明
@@ -1318,12 +1835,20 @@ function syncRanges() {
   sel.title = D.rangeLabel || '';
 }
 
-// 画图：面板首次可见前 canvas 尺寸可能还是 0，用 rAF 重试一次
+// 画图：面板首次可见前 canvas 尺寸可能还是 0，用 rAF 重试一次。
+// 不能以消费金额图为锚点：charts.items 可能把它关掉，此时其余图仍需绘制。
 function drawChart(retried) {
-  var c = document.getElementById('costChart'); if (!c) return;
-  var r = c.getBoundingClientRect();
+  var first = null;
+  CHART_DEFS.forEach(function(cd) {
+    if (!first) first = document.getElementById(cd.canvas);
+  });
+  if (!first) return;
+  var r = first.getBoundingClientRect();
   if ((!r.width || !r.height) && !retried) { requestAnimationFrame(function() { drawChart(true); }); return; }
-  drawCostBars(c, D && D.hasUsage ? D.bars : [], D && D.granularity);
+  CHART_DEFS.forEach(function(cd) {
+    var canvas = document.getElementById(cd.canvas); if (!canvas) return;
+    drawBars(canvas, D && D.hasUsage ? D.bars : [], cd.metric);
+  });
 }
 
 function setBusy(busy) {
@@ -1374,16 +1899,31 @@ function onRangeChange() {
 // ---- CSP-safe event binding (no inline onclick/onchange) ----
 document.getElementById('refreshBtn').addEventListener('click', doRefresh);
 document.getElementById('rangeSelect').addEventListener('change', onRangeChange);
-document.getElementById('colorBtn').addEventListener('click', function() {
-  var el = document.getElementById('colorPanel'); if (!el) return;
-  if (el.hidden) {
+document.getElementById('costStatCycle').addEventListener('click', function() { post('cycleCostCard'); });
+(function() {
+  var curSel = document.getElementById('curSelect');   // 没配消费金额图时该元素不存在
+  if (!curSel) return;
+  curSel.addEventListener('change', function() {
+    panelCurrency = this.value;   // 各币种金额都在载荷里：本地重渲染即可，不重新取数
+    render();
+    drawChart(true);
+    hideChartTip();
+  });
+})();
+// 每张图一个「配色」按钮：点开的是自己那张图的配置；再点同一个按钮收起
+CHART_DEFS.forEach(function(cd) {
+  var btn = document.getElementById(cd.btn); if (!btn) return;
+  btn.addEventListener('click', function() {
+    var el = document.getElementById('colorPanel'); if (!el) return;
+    if (!el.hidden && colorPanelMetric === cd.metric) { el.hidden = true; return; }
+    colorPanelMetric = cd.metric;
     renderColorPanel();
-    // 浮层贴着按钮展开（按钮在图表卡右上角，位置随窗口宽度变化）
+    // 浮层贴着被点的按钮展开（按钮在图表卡右上角，位置随窗口宽度变化）
     var r = this.getBoundingClientRect();
     el.style.top = Math.round(r.bottom + 6) + 'px';
     el.style.right = Math.max(12, Math.round(window.innerWidth - r.right)) + 'px';
     el.hidden = false;
-  } else { el.hidden = true; }
+  });
 });
 document.getElementById('settingsBtn').addEventListener('click', function() {
   post('openMenu');   // 入口菜单在宿主侧用 QuickPick 展开
@@ -1395,18 +1935,32 @@ var ro = new ResizeObserver(function() {
   if (resizeDebounce) clearTimeout(resizeDebounce);
   resizeDebounce = setTimeout(function() { drawChart(true); }, 200);
 });
-ro.observe(document.getElementById('costWrap'));
+CHART_DEFS.forEach(function(cd) {
+  var wrap = document.getElementById(cd.wrap);
+  if (wrap) ro.observe(wrap);   // 未配置的图没有 DOM：observe(undefined) 会抛错，整个面板脚本会中止
+});
 
-// 首屏 — 占位，图表显示"加载中"，等待扩展推送数据
+// 首屏 — 占位，三张图都显示"加载中"，等待扩展推送数据；时区说明先按外壳注入的时区填一次
+setText('tzNote', String(I18N.tzNote || '').replace('{0}', TZ_LABEL));
 (function() {
-  var c = document.getElementById('costChart'); if (!c) return;
-  var ctx = getCtx(c.id);
-  if (ctx) drawEmpty(ctx, c.cw, c.ch, I18N.loading || '');
+  CHART_DEFS.forEach(function(cd) {
+    var c = document.getElementById(cd.canvas); if (!c) return;
+    var ctx = getCtx(c.id);
+    if (ctx) drawEmpty(ctx, c.cw, c.ch, I18N.loading || '');
+  });
 })();
 syncRanges();
+// 上报客户端时区：宿主在 auto 模式下采用（扩展运行在远端，宿主无法获取客户端时区）
+try { post('clientZone', { zone: Intl.DateTimeFormat().resolvedOptions().timeZone }); } catch (e) {}
 post('ready');
 })();
 </script></body></html>`;
+  // 字号缩放：CSS 里的 px 字号/行高统一乘系数；canvas 侧由脚本里的 FONT_SCALE 处理
+  const scale = Number.isFinite(fontScale) ? fontScale : 1;
+  return html
+    .replace('<style>', '<style>\nhtml{--fs:' + scale + '}')
+    .replace(/font-size:(\d+(?:\.\d+)?)px/g, 'font-size:calc($1px * var(--fs))')
+    .replace(/line-height:(\d+(?:\.\d+)?)px/g, 'line-height:calc($1px * var(--fs))');
 }
 
 // ============================================================
@@ -1419,6 +1973,46 @@ async function activate(context) {
   const config = () => vscode.workspace.getConfiguration('deepseek-usage-monitor');
   const langKey = () => config().get('language', 'zh-cn');
 
+  // 时区：设置项（任意 IANA 名 / GMT±N）优先；留空 = 跟随客户端（面板上报并存 globalState）；最后回落 UTC+8
+  let tzWarned = false;
+  function resolveZone() {
+    const raw = config().get('timezone', '');
+    if (String(raw == null ? '' : raw).trim()) {
+      const norm = normalizeZone(raw);
+      if (norm) return setActiveZone(norm);
+      if (!tzWarned) { tzWarned = true; vscode.window.showWarningMessage(tf('tzInvalid', raw)); }
+    }
+    const stored = normalizeZone(context.globalState.get(TZ_CLIENT_KEY, ''));
+    if (stored) return setActiveZone(stored);
+    return setActiveZone(DEFAULT_ZONE);
+  }
+  resolveZone();
+
+  // 配色：设置项 chartColors 是唯一真源（可随设置同步/配置导出迁移）；
+  // 老版本的 globalState 配置在激活时迁移一次并清掉，避免两处真源
+  function chartColorSetting() { return config().get('chartColors', {}) || {}; }
+  function legacyChartColorState() {
+    const gs = context.globalState;
+    const three = gs.get(CHART_COLORS_KEY, null);
+    if (three && typeof three === 'object') return three;
+    const mode = gs.get(CHART_LEGACY_KEYS.mode, '');
+    const map = gs.get(CHART_LEGACY_KEYS.modelColors, {}) || {};
+    const base = gs.get(CHART_LEGACY_KEYS.baseColor, '');
+    if (!mode && !base && !Object.keys(map).length) return null;
+    return { cost: { mode, modelColors: map, baseColor: base } };
+  }
+  async function migrateChartColors() {
+    if (Object.keys(chartColorSetting()).length) return;
+    const legacy = legacyChartColorState();
+    if (!legacy) return;
+    await config().update('chartColors', resolveChartConfigs(legacy, null), vscode.ConfigurationTarget.Global);
+    await context.globalState.update(CHART_COLORS_KEY, undefined);
+    await context.globalState.update(CHART_LEGACY_KEYS.mode, undefined);
+    await context.globalState.update(CHART_LEGACY_KEYS.modelColors, undefined);
+    await context.globalState.update(CHART_LEGACY_KEYS.baseColor, undefined);
+  }
+  migrateChartColors().catch(() => {});
+
   // ---- Status bar ----
   const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 1);
   // 状态栏点击的行为由 statusBar.closeWhenActive 决定；命令面板的「打开面板」始终只开/聚焦
@@ -1428,7 +2022,7 @@ async function activate(context) {
   statusBarItem.show();
 
   // ---- Config ----
-  // secrets 读取：带超时兜底 + 内存缓存（详见文件顶部注释）
+  // secrets 读取：带超时回退 + 内存缓存（详见文件顶部注释）
   let apiKeyCache; // undefined=还没读到；''=确认没有；'sk-...'=有
   let secretsReadOnce = null;  // 只发起一次 secrets.get，超时后不反复发起
   let lateWaitRunning = false;
@@ -1513,13 +2107,15 @@ async function activate(context) {
 
   // ---- Data ----
   // usage = 所选窗口（喂图表与三项指标）；month = 与窗口无关的本月快照（喂今日卡与状态栏）
-  let latestData = { balance: null, usage: null, month: null, hasCreds: false, error: null, errorText: null };
+  // hasCreds 初始为 null（未知）：首次刷新返回前不能断言「未配置凭证」，
+  // 否则面板一连上就会把占位载荷渲染成「请在设置中配置…」
+  let latestData = { balance: null, usage: null, month: null, hasCreds: null, error: null, errorText: null, usageFailed: false, totalCosts: [], hasTotal: false };
   let lastUpdatedAt = null;   // 最近一次成功取到数据的时刻（面板显示"数据更新时间"）
   // 面板时间窗口：读取持久化值，非法或已删除的 id 一律回落默认预设
   let currentPreset = (() => { const v = context.globalState.get(PRESET_STATE_KEY); return isPreset(v) ? v : DEFAULT_PRESET; })();
   function savePreset(id) { Promise.resolve(context.globalState.update(PRESET_STATE_KEY, id)).catch(() => {}); }
   let refreshInFlight = null;   // 进行中的刷新 Promise；null = 空闲
-  let refreshQueued = null;     // 执行期间到达的刷新请求，仅保留最后一次，结束后补跑；用于串行化，避免并发写 latestData 与重复请求
+  let refreshQueued = null;     // 执行期间到达的刷新请求，仅保留最后一次，结束后补执行；用于串行化，避免并发写 latestData 与重复请求
   let refreshBusy = false;      // 刷新状态标志
 
   // 用窗口区间取用量；结构无法识别时如实报错，不做静默回退
@@ -1530,28 +2126,29 @@ async function activate(context) {
     return agg;
   }
 
-  // 与窗口无关的本月快照。优先用独立拉取的本月窗口；窗口自身已覆盖"本月 1 日 → 现在"时复用窗口数据；
-  // 都不满足（昨天 / 上月）时今日值未知，如实返回 null（面板与状态栏显示 —）。
-  function buildMonthSnapshot({ monthAgg, windowAgg, spec, nowMs }) {
+  // 与窗口无关的本月快照。优先用独立拉取的本月窗口；窗口恰好从本月 1 日开始时可复用其合计；
+  // 其余情形（昨天 / 上月 / 跨上月的近 7·30 天）本月合计另取，今日值则在日粒度的最后一根柱子上读取。
+  function buildMonthSnapshot({ monthAgg, windowAgg, spec, nowMs, currency }) {
+    const costOf = (bar) => ((bar && bar.costBy ? bar.costBy[currency] : 0) || 0);
     const now = nowMs == null ? Date.now() : nowMs;
-    const t8 = new Date(now + TZ8_OFFSET_MS);
-    const todayDate = `${pad2(t8.getUTCMonth() + 1)}-${pad2(t8.getUTCDate())}`;
+    const t8 = zoneParts(Math.floor(now / 1000));
+    const todayDate = `${pad2(t8.month)}-${pad2(t8.day)}`;
     const lastOf = (agg) => (agg && agg.bars.length ? agg.bars[agg.bars.length - 1] : null);
     if (monthAgg) {
       const bar = lastOf(monthAgg);   // 本月窗口的最后一根即今天
-      return { totalCost: monthAgg.totalCost, todayCost: bar ? bar.cost : 0, todayTokens: bar ? bar.tokens : 0 };
+      return { totalCost: (monthAgg.totalCostBy || {})[currency] || 0, todayCost: costOf(bar), todayTokens: bar ? bar.tokens : 0 };
     }
     if (!windowAgg) return null;
     if (coversMonthToDate(spec, now)) {
       const bar = lastOf(windowAgg);
-      return { totalCost: windowAgg.totalCost, todayCost: bar ? bar.cost : 0, todayTokens: bar ? bar.tokens : 0 };
+      return { totalCost: (windowAgg.totalCostBy || {})[currency] || 0, todayCost: costOf(bar), todayTokens: bar ? bar.tokens : 0 };
     }
     if (spec.id === 'today') {
-      return { totalCost: null, todayCost: windowAgg.totalCost, todayTokens: windowAgg.totalTokens };
+      return { totalCost: null, todayCost: (windowAgg.totalCostBy || {})[currency] || 0, todayTokens: windowAgg.totalTokens };
     }
     if (spec.granularity === 'day') {
       const bar = lastOf(windowAgg);
-      if (bar && bar.date === todayDate) return { totalCost: null, todayCost: bar.cost, todayTokens: bar.tokens };
+      if (bar && bar.date === todayDate) return { totalCost: null, todayCost: costOf(bar), todayTokens: bar.tokens };
     }
     return { totalCost: null, todayCost: null, todayTokens: null };
   }
@@ -1564,12 +2161,15 @@ async function activate(context) {
     const cfg = await getConfig();
     const hasCreds = !!(cfg.sessionToken && cfg.cookie);
     const needMonth = hasCreds && !coversMonthToDate(spec, now);
-    latestData = { balance: null, usage: null, month: null, hasCreds, error: null, errorText: null };
+    const wantTotal = currentCostCard === 'total';
+    latestData = { balance: null, usage: null, month: null, hasCreds, error: null, errorText: null, usageFailed: false, totalCosts: [], hasTotal: false };
 
     const results = await Promise.allSettled([
       cfg.apiKey ? fetchBalance(cfg.apiKey) : Promise.reject(new Error('no-api-key')),
       hasCreds ? fetchUsageSpec(cfg.sessionToken, cfg.cookie, cfg.proxy, spec, now) : Promise.reject(new Error('no-session')),
       needMonth ? fetchUsageSpec(cfg.sessionToken, cfg.cookie, cfg.proxy, resolveRange('thisMonth', now), now) : Promise.resolve(null),
+      // 只在卡片设为「累计消费」时才额外打这个接口（顺带也用于将来的余额来源）
+      (wantTotal && hasCreds) ? fetchPlatformApi(cfg.sessionToken, cfg.cookie, cfg.proxy, '/api/v0/users/get_user_summary') : Promise.resolve(null),
     ]);
 
     const errors = [];
@@ -1577,10 +2177,22 @@ async function activate(context) {
     if (results[0].status === 'fulfilled') latestData.balance = results[0].value;
     else if (results[0].reason.message !== 'no-api-key') pushErr('Balance', results[0].reason.message);
     if (results[1].status === 'fulfilled') latestData.usage = results[1].value;
-    else if (results[1].reason.message !== 'no-session') pushErr('Usage', results[1].reason.message);
+    else if (results[1].reason.message !== 'no-session') {
+      latestData.usageFailed = true;   // 仅用量窗口失败；余额失败不影响图表的空态文案
+      pushErr('Usage', results[1].reason.message);
+    }
     const monthAgg = results[2].status === 'fulfilled' ? results[2].value : null;
     if (results[2].status === 'rejected' && needMonth) pushErr('Usage', results[2].reason.message);
-    latestData.month = buildMonthSnapshot({ monthAgg, windowAgg: latestData.usage, spec, now });
+    const summary = results[3].status === 'fulfilled' ? results[3].value : null;
+    if (results[3].status === 'rejected' && wantTotal && hasCreds) pushErr('Usage', results[3].reason.message);
+    latestData.totalCosts = summary ? parseTotalCosts(summary) : [];
+    latestData.hasTotal = hasSummaryData(summary);
+    // 展示币种：优先账户主币种（余额第一项），否则用量里的第一个；面板可临时切换
+    const balItems = parseBalanceItems(latestData.balance);
+    // 窗口里没有金额数据时（比如上月）退回本月快照的币种列表，避免展示币种变成空
+    const currencySource = (latestData.usage && latestData.usage.currencies.length) ? latestData.usage : (monthAgg || latestData.usage);
+    latestData.currency = pickDisplayCurrency(balItems, currencySource);
+    latestData.month = buildMonthSnapshot({ monthAgg, windowAgg: latestData.usage, spec, now, currency: latestData.currency });
     // error 保留异常原文（面板 hover、日志排查用）；errorText 是展示给用户的本地化文案
     latestData.error = errors.length ? errors.map(([scope, m]) => scope + ': ' + m).join(' | ') : null;
     latestData.errorText = errors.length
@@ -1599,7 +2211,7 @@ async function activate(context) {
     pushData(); // 推送 busy=true，供按钮反馈
     refreshInFlight = (async () => {
       try { await refreshAllData(presetId, undefined); }
-      // 兜底：刷新流程本身抛异常（非接口错误）时同样给出两份文案，避免 errorText 残留上一次的
+      // 异常处理：刷新流程本身抛异常（非接口错误）时同样给出两份文案，避免 errorText 残留上一次的
       catch (e) { latestData.error = (e && e.message) || String(e); latestData.errorText = humanizeError(latestData.error); }
       finally {
         refreshBusy = false; refreshInFlight = null;
@@ -1613,7 +2225,10 @@ async function activate(context) {
 
   // 状态栏显示项由设置 deepseek-usage-monitor.statusBar.items 决定显示内容和项目顺序
   const SB_DEFAULT_ITEMS = ['todayCost', 'balance'];
-  const fmtMoney = (label, v) => `${label}:${v == null ? '—' : '¥' + v}`;
+  // 金额只带货币代码（不用符号：CNY/JPY 都是 ¥，映射表本身有歧义）
+  const moneyText = (v, currency) => (v == null ? '—' : `${v}${currency ? ' ' + currency : ''}`);
+  const fmtCost2 = (n) => (Number.isFinite(Number(n)) ? Number(n).toFixed(2) : null);
+  const fmtMoney = (label, v, currency) => `${label}:${moneyText(v, currency)}`;
   const fmtThousands = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 
   // 状态栏里的名称部分（默认 DeepSeek Usage，可由 statusBar.label 覆盖为任意文本）。
@@ -1624,20 +2239,65 @@ async function activate(context) {
     return String(raw == null ? '' : raw).replace(/[\r\n\t]+/g, ' ').trim();
   }
 
-  // 拼状态栏文本：[图标, 名称, 数据] 中为空的部分自动省略，避免多余空格
+  // 拼接状态栏文本：[图标, 名称, 数据] 中为空的部分自动省略，避免多余空格
   function statusText(icon, rest) {
     return [icon, statusLabel(), rest].filter(Boolean).join(' ');
   }
 
-  function buildStatusSegments({ today, cost, balTotal, todayTokens }) {
+  // 面板字号缩放比例：0.8–1.4，非法值回落 1
+  function panelFontScale() {
+    const n = Number(config().get('dashboard.fontScale', 1));
+    return Number.isFinite(n) ? Math.round(Math.max(0.8, Math.min(1.4, n)) * 100) / 100 : 1;
+  }
+
+  // 首行消费统计卡显示内容：today / month / total（累计）。与时间范围一样存 globalState，
+  // 面板重建 / Reload 后恢复；不随设置项迁移
+  const COST_CARD_ORDER = ['today', 'month', 'total'];
+  function readCostCard() {
+    const v = String(context.globalState.get(COST_CARD_KEY, '') || '');
+    return COST_CARD_ORDER.indexOf(v) >= 0 ? v : 'today';
+  }
+  let currentCostCard = readCostCard();
+  async function cycleCostCard() {
+    currentCostCard = COST_CARD_ORDER[(COST_CARD_ORDER.indexOf(currentCostCard) + 1) % COST_CARD_ORDER.length];
+    await context.globalState.update(COST_CARD_KEY, currentCostCard);
+    if (currentCostCard === 'total' && !latestData.hasTotal) await fetchTotalCosts();
+    pushData();
+  }
+  // 只补拉账号概览（累计消费），不动其它数据：切换卡片时不重新取用量
+  async function fetchTotalCosts() {
+    const cfg = await getConfig();
+    if (!cfg.sessionToken || !cfg.cookie) { latestData.totalCosts = []; latestData.hasTotal = false; return; }
+    try {
+      const json = await fetchPlatformApi(cfg.sessionToken, cfg.cookie, cfg.proxy, '/api/v0/users/get_user_summary');
+      latestData.totalCosts = parseTotalCosts(json);
+      latestData.hasTotal = hasSummaryData(json);
+    } catch (e) {
+      latestData.totalCosts = [];
+      latestData.hasTotal = false;
+    }
+  }
+
+  // 面板图表：在列即显示、数组顺序即面板顺序；留空则不显示任何图表
+  function chartItems() {
+    const configured = config().get('charts.items', CHART_METRICS);
+    const list = Array.isArray(configured) ? configured : CHART_METRICS;
+    return Array.from(new Set(list.filter((v) => CHART_METRICS.indexOf(v) >= 0)));
+  }
+
+  function buildStatusSegments({ today, cost, usageCurrency, balItems, todayTokens }) {
     const i18n = t();
     const configured = config().get('statusBar.items', SB_DEFAULT_ITEMS);
     const items = Array.isArray(configured) ? configured : SB_DEFAULT_ITEMS;
     const segs = [];
+    // 余额可能多币种：逐项列出并用 + 连接（与面板卡片一致）
+    const balText = (Array.isArray(balItems) && balItems.length)
+      ? balItems.map((it) => moneyText(fmtCost2(it.total), it.currency)).join(' + ')
+      : '—';
     for (const item of items) {
-      if (item === 'todayCost') segs.push(fmtMoney(i18n.sbTodayCost, today));
-      else if (item === 'monthCost') segs.push(fmtMoney(i18n.sbMonthCost, cost));
-      else if (item === 'balance') segs.push(fmtMoney(i18n.sbBalance, balTotal));
+      if (item === 'todayCost') segs.push(fmtMoney(i18n.sbTodayCost, today, usageCurrency));
+      else if (item === 'monthCost') segs.push(fmtMoney(i18n.sbMonthCost, cost, usageCurrency));
+      else if (item === 'balance') segs.push(`${i18n.sbBalance}:${balText}`);
       else if (item === 'todayTokens') segs.push(`${i18n.sbTodayTokens} ${todayTokens == null ? '—' : fmtThousands(todayTokens)} ${i18n.tokens}`);
     }
     return segs;
@@ -1646,23 +2306,27 @@ async function activate(context) {
   function updateStatusBar() {
     const { balance, usage, month, error, errorText } = latestData;
     if (error) { statusBarItem.text = statusText('$(error)'); statusBarItem.tooltip = errorText ? `${errorText}\n(${error})` : error; statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground'); return; }
-    const bal = balance?.balance_infos?.[0]; const balTotal = bal ? parseFloat(bal.total_balance).toFixed(2) : null;
+    const balItems = parseBalanceItems(balance);
     // 状态栏的"本月/本日"恒为当前月与今天，与面板所选窗口无关
     const cost = month && month.totalCost != null ? month.totalCost.toFixed(2) : null;
     const today = month && month.todayCost != null ? month.todayCost.toFixed(2) : null;
     const todayTokens = month && month.todayTokens != null ? month.todayTokens : null;
+    const usageCurrency = latestData.currency || '';
 
     // 未配置任何凭证时保留引导，避免状态栏显示一长串 —
-    if (!balTotal && !month && !usage) {
+    if (!balItems.length && !month && !usage) {
       statusBarItem.text = statusText('$(key)');
       statusBarItem.tooltip = keyDegraded ? `${t().errNoApiKey}\n${t().keySessionOnly}` : t().errNoApiKey;
       statusBarItem.backgroundColor = undefined;
       return;
     }
 
-    const segs = buildStatusSegments({ today, cost, balTotal, todayTokens });
+    const segs = buildStatusSegments({ today, cost, usageCurrency, balItems, todayTokens });
     statusBarItem.text = statusText('$(credit-card)', segs.length ? segs.join(' | ') : '');
-    statusBarItem.tooltip = `${t().sbMonthCost}: ¥${cost ?? '—'} | ${t().sbTodayCost}: ¥${today ?? '—'} | ${t().sbBalance}: ¥${balTotal ?? '—'}\n${t().clickDetails}`
+    const balLine = balItems.length
+      ? balItems.map((it) => moneyText(fmtCost2(it.total), it.currency)).join(' + ')
+      : '—';
+    statusBarItem.tooltip = `${t().sbMonthCost}: ${moneyText(cost, usageCurrency)} | ${t().sbTodayCost}: ${moneyText(today, usageCurrency)} | ${t().sbBalance}: ${balLine}\n${t().clickDetails}`
       + (keyDegraded ? `\n${t().keySessionOnly}` : '');
     statusBarItem.backgroundColor = undefined;
   }
@@ -1675,11 +2339,11 @@ async function activate(context) {
   // 面板数据载荷（结构对应 webview 里的 D）
   function buildPayload() {
     const { balance, usage, month, error, errorText, hasCreds } = latestData;
+    const cfgs = resolveChartConfigs(chartColorSetting());
     const spec = resolveRange(currentPreset);
-    const balInfo = (balance && Array.isArray(balance.balance_infos) && balance.balance_infos.length) ? balance.balance_infos[0] : null;
-    const bal = balInfo ? {
-      toppedUp: parseFloat(balInfo.topped_up_balance) || 0,
-      granted: parseFloat(balInfo.granted_balance) || 0,
+    const balItems = parseBalanceItems(balance);
+    const bal = balItems.length ? {
+      items: balItems,   // 每项一个币种，面板逐项展示（用 + 连接），不做汇率换算
       // is_available 是"余额是否足以继续调用 API"的标志，为 false 时数字仍然有效，只降级成一行提示
       insufficient: balance.is_available === false,
     } : null;
@@ -1688,20 +2352,31 @@ async function activate(context) {
       preset: currentPreset,                        // 六个预设 id 之一
       rangeLabel: fmtRangeLabel(spec),              // 悬停下拉时显示具体区间
       rangeStart: spec.startSec, rangeEnd: spec.endSec,
+      tzZone: activeZone,                                                       // 展示/分桶时区（IANA 名）
+      tzLabel: zoneGmtLabel(Math.floor(Date.now() / 1000)),                     // 当前偏移（GMT+8 / GMT+5:30）
+      tzNote: String(t().tzNote || '').replace('{0}', zoneGmtLabel(Math.floor(Date.now() / 1000))),
+      costCard: currentCostCard,                                                // 首行消费统计卡：today / month / total
+      totalCosts: latestData.totalCosts || [],                                 // 累计消费（按币种，仅 total 模式会拉）
+      hasTotal: !!latestData.hasTotal,
+      currency: latestData.currency || '',                                      // 默认展示币种（面板可切换）
+      currencies: usage ? usage.currencies : [],                               // 用量窗口里出现过的币种（>1 时面板出币种下拉）
+      totalCostBy: usage ? usage.totalCostBy : {},                             // 各币种合计：消费金额卡逐项用 + 连接
+      totalCost: usage ? ((usage.totalCostBy || {})[latestData.currency] || 0) : 0,   // 默认币种合计（状态栏/兼容）
       granularity: usage ? usage.granularity : spec.granularity,   // 失败时仍按预设，空图坐标轴才正确
       bucket: usage ? usage.spec.slotSec : spec.slotSec,
       busy: refreshBusy,
       keyDegraded,
       error: error || null,
       errorText: errorText || null,
+      usageFailed: !!latestData.usageFailed,   // 图表的空态区分"用量请求失败"与"该窗口无数据"
       updatedAt: lastUpdatedAt,
-      hasBalance: !!balInfo, bal,
+      hasBalance: !!bal, bal,
       hasCreds,                                     // 区分"没配凭证"与"拉取失败"
       hasUsage: !!usage,
       models: usage ? usage.models : [], bars: usage ? usage.bars : [],
-      chart: resolveChartConfig(context),                                        // 面板配色控件用（模式/主色/按模型覆盖）
-      colors: chartColorMap(context, usage ? usage.models.map((m) => m.model) : []), // 已解析的最终颜色，面板只查表
-      totalCost: usage ? usage.totalCost : 0, totalTokens: usage ? usage.totalTokens : 0, totalReqs: usage ? usage.totalReqs : 0,
+      chart: cfgs,                                                              // 三张图各自的配色控件状态（模式/主色/按模型覆盖）
+      colors: chartColorsAll(cfgs, usage ? usage.models.map((m) => m.model) : []), // 每张图已解析的最终颜色，面板只查表
+      totalTokens: usage ? usage.totalTokens : 0, totalReqs: usage ? usage.totalReqs : 0,
       monthCost: month ? month.totalCost : null,    // 与窗口无关
       hasToday: !!(month && month.todayCost != null),
       todayCost: month ? month.todayCost : null, todayTokens: month ? month.todayTokens : null,
@@ -1718,7 +2393,7 @@ async function activate(context) {
     if (!currentPanel) return;
     panelReady = false;
     panelLang = langKey();
-    currentPanel.webview.html = buildPanelHtml(t(), langKey(), currentPreset, resolveBackground(context, currentPanel.webview));
+    currentPanel.webview.html = buildPanelHtml(t(), langKey(), currentPreset, resolveBackground(context, currentPanel.webview), chartItems(), panelFontScale());
   }
 
   // 状态栏点击：默认只打开/聚焦（statusBar.closeWhenActive = false）；
@@ -1748,7 +2423,7 @@ async function activate(context) {
     });
     panelReady = false; panelLang = langKey();
     // 外壳只在这里（以及语言/背景变化时）设置一次
-    currentPanel.webview.html = buildPanelHtml(t(), langKey(), currentPreset, resolveBackground(context, currentPanel.webview));
+    currentPanel.webview.html = buildPanelHtml(t(), langKey(), currentPreset, resolveBackground(context, currentPanel.webview), chartItems(), panelFontScale());
 
     currentPanel.webview.onDidReceiveMessage(async (msg) => {
       try {
@@ -1767,6 +2442,17 @@ async function activate(context) {
           await refresh(id, 'range');                  // 失败也不弹窗，错误经面板横条呈现
         } else if (msg.type === 'openMenu') {
           await promptMainMenu();                  // 面板唯一入口：菜单里再分发到各流程
+        } else if (msg.type === 'cycleCostCard') {
+          await cycleCostCard();                   // 卡片右上角按钮：today → month → total → today
+        } else if (msg.type === 'clientZone') {
+          // 仅 auto 模式（设置为空）下采用客户端时区；变了才重新取数
+          const z = normalizeZone(msg.zone);
+          if (z && !String(config().get('timezone', '') || '').trim()) {
+            await context.globalState.update(TZ_CLIENT_KEY, z);
+            const before = activeZone;
+            setActiveZone(z);
+            if (activeZone !== before) refresh(undefined, 'client-timezone');
+          }
         } else if (msg.type === 'setChartColors') {
           await applyChartColors(msg);             // 只改渲染，不重取数据
         }
@@ -1823,6 +2509,7 @@ async function activate(context) {
       picked = await vscode.window.showOpenDialog({
         canSelectMany: false,
         openLabel: t().bgPickTitle,
+        defaultUri: vscode.Uri.file(localDialogDir()),   // file: → 客户端原生对话框（远程窗口也一样）
         filters: { Images: ['png', 'jpg', 'jpeg', 'webp', 'gif'] },
       });
     } catch (e) { picked = undefined; }
@@ -1899,21 +2586,24 @@ async function activate(context) {
   }
 
   // ---- Chart colors ----
-  // 面板配色控件写回 globalState。只影响渲染：不重建外壳、不重取数据。
+  // 面板配色控件写回设置项 chartColors（可迁移）。只影响渲染：不重建外壳、不重取数据。
   // 指定单个模型的颜色即隐含切到「按模型指定」，否则界面上看不到变化。
   async function applyChartColors(msg) {
-    const gs = context.globalState;
+    const metric = CHART_METRICS.indexOf(String(msg.metric || '')) >= 0 ? String(msg.metric) : 'cost';
+    const all = Object.assign({}, chartColorSetting());
+    const next = sanitizeChartConfig(all[metric]);
     const mode = String(msg.mode || '');
-    if (CHART_COLOR_MODES.indexOf(mode) >= 0) await gs.update(CHART_STATE_KEYS.mode, mode);
+    if (CHART_COLOR_MODES.indexOf(mode) >= 0) next.mode = mode;
     const color = sanitizeChartColor(msg.color);
     if (color && msg.model) {
-      const map = Object.assign({}, gs.get(CHART_STATE_KEYS.modelColors, {}) || {});
-      map[String(msg.model)] = color;
-      await gs.update(CHART_STATE_KEYS.modelColors, map);
-      if (String(gs.get(CHART_STATE_KEYS.mode, '') || '') !== 'model') await gs.update(CHART_STATE_KEYS.mode, 'model');
+      next.modelColors = Object.assign({}, next.modelColors, { [String(msg.model)]: color });
+      // 指定单个模型的颜色即隐含切到「按模型指定」，否则界面上看不到变化
+      if (next.mode !== 'model') next.mode = 'model';
     } else if (color) {
-      await gs.update(CHART_STATE_KEYS.baseColor, color);
+      next.baseColor = color;
     }
+    all[metric] = next;
+    await config().update('chartColors', all, vscode.ConfigurationTarget.Global);
     pushData();
   }
 
@@ -1967,9 +2657,10 @@ async function activate(context) {
     }
     let target;
     try {
-      const folder = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0];
+      // 扩展以 UI 扩展运行（extensionKind: ui）：默认保存到本机用户目录。
+      // 工作区路径在远程窗口里属于远端文件系统，本机宿主无法直接写入
       target = await vscode.window.showSaveDialog({
-        defaultUri: folder ? vscode.Uri.joinPath(folder.uri, 'deepseek-usage-config.json') : undefined,
+        defaultUri: vscode.Uri.file(path.join(os.homedir(), 'deepseek-usage-config.json')),
         filters: { JSON: ['json'] },
         saveLabel: t().exportConfigTitle,
       });
@@ -1996,7 +2687,9 @@ async function activate(context) {
     let picked;
     try {
       picked = await vscode.window.showOpenDialog({
-        canSelectMany: false, openLabel: t().importConfigTitle, filters: { JSON: ['json'] },
+        canSelectMany: false, openLabel: t().importConfigTitle,
+        defaultUri: vscode.Uri.file(localDialogDir()),     // 同上：避免远程窗口打开远端目录
+        filters: { JSON: ['json'] },
       });
     } catch (e) { picked = undefined; }
     if (!picked || !picked.length) return;
@@ -2039,6 +2732,24 @@ async function activate(context) {
       stateApply[key] = v;
     }
 
+    // 旧格式兼容：配色曾存在 state（deepseekUsage.chartColors / chartColorMode…），折算成设置项
+    if (!Object.prototype.hasOwnProperty.call(apply, 'chartColors')) {
+      const legacyColors = stateApply[CHART_COLORS_KEY]
+        || (stateApply[CHART_LEGACY_KEYS.mode] || stateApply[CHART_LEGACY_KEYS.baseColor]
+            || Object.keys(stateApply[CHART_LEGACY_KEYS.modelColors] || {}).length
+          ? { cost: {
+              mode: stateApply[CHART_LEGACY_KEYS.mode],
+              modelColors: stateApply[CHART_LEGACY_KEYS.modelColors],
+              baseColor: stateApply[CHART_LEGACY_KEYS.baseColor],
+            } }
+          : null);
+      if (legacyColors) apply.chartColors = sanitizeConfigSetting('chartColors', legacyColors);
+      // 这些老键不再写回状态（真源已移到设置项）
+      delete stateApply[CHART_COLORS_KEY];
+      delete stateApply[CHART_LEGACY_KEYS.mode];
+      delete stateApply[CHART_LEGACY_KEYS.modelColors];
+      delete stateApply[CHART_LEGACY_KEYS.baseColor];
+    }
     const nSettings = Object.keys(apply).length;
     const nState = Object.keys(stateApply).length;
     if (!nSettings && !nState) { vscode.window.showWarningMessage(t().importNothing); return; }
@@ -2061,7 +2772,7 @@ async function activate(context) {
   // ---- Commands ----
   context.subscriptions.push(
     vscode.commands.registerCommand('deepseek-usage-monitor.showUsage', () => openUsagePanel()),
-    // 内部命令：只给状态栏点击用，不在 package.json 里声明（因此不出现在命令面板）
+    // 内部命令：仅供状态栏点击使用，不在 package.json 里声明（因此不出现在命令面板）
     vscode.commands.registerCommand('deepseek-usage-monitor.statusBarClick', () => onStatusBarClick()),
     vscode.commands.registerCommand('deepseek-usage-monitor.refresh', () => refresh(undefined, 'command')),
     vscode.commands.registerCommand('deepseek-usage-monitor.setApiKey', () => promptApiKeyFlow()),
@@ -2073,7 +2784,21 @@ async function activate(context) {
       if (!e.affectsConfiguration('deepseek-usage-monitor')) return;
       if (e.affectsConfiguration('deepseek-usage-monitor.refreshInterval')) startAutoRefresh();
       if (e.affectsConfiguration('deepseek-usage-monitor.language') && currentPanel) rebuildShell();
-      if (e.affectsConfiguration('deepseek-usage-monitor.dashboard') && currentPanel) rebuildShell();
+      const dashChanged = e.affectsConfiguration('deepseek-usage-monitor.dashboard');
+      const chartsChanged = e.affectsConfiguration('deepseek-usage-monitor.charts');
+      if (dashChanged && currentPanel) rebuildShell();
+      if (chartsChanged && currentPanel) rebuildShell();
+      if (e.affectsConfiguration('deepseek-usage-monitor.timezone')) resolveZone();
+      // 只有配色变化：重渲染即可，不必重新取数
+      const colorsOnly = e.affectsConfiguration('deepseek-usage-monitor.chartColors')
+        && !['sessionToken', 'cookie', 'proxy', 'language', 'statusBar', 'refreshInterval', 'dashboard', 'charts', 'timezone']
+          .some((k) => e.affectsConfiguration('deepseek-usage-monitor.' + k));
+      if (colorsOnly) { pushData(); return; }
+      // 纯外观变化（字号、背景、图表开关）只需重建外壳，数据与载荷不变，不重新取数
+      const appearanceOnly = (dashChanged || chartsChanged)
+        && !['sessionToken', 'cookie', 'proxy', 'language', 'statusBar', 'refreshInterval', 'timezone', 'chartColors']
+          .some((k) => e.affectsConfiguration('deepseek-usage-monitor.' + k));
+      if (appearanceOnly) return;
       refresh(undefined, 'config');
     }),
     statusBarItem
@@ -2081,17 +2806,20 @@ async function activate(context) {
 
   // Init —— 首刷不阻塞 activate()：网络慢时会让扩展激活挂起数秒（请求超时上限 15s），状态栏先显示加载态即可
   refresh(undefined, 'init');
-  // 自动刷新必须带上当前选中的月份，否则会把用户选的月份重置回当月
+  // 自动刷新不带 preset：refresh 省略该参数时沿用 currentPreset（用户所选窗口）
   startAutoRefresh();
   context.subscriptions.push({ dispose: stopAutoRefresh });
-  console.log('[DeepSeek Usage Monitor] Activated');
+  console.log('[DeepSeek Usage Monitor] Activated (+' + (Date.now() - LOADED_AT) + 'ms since load)');
 }
 
 function deactivate() { console.log('[DeepSeek Usage Monitor] Deactivated'); }
 module.exports = { activate, deactivate, __test: {
   resolveRange, slotStartSec, visibleSlotCount, coversMonthToDate, bucketSecOf,
+  seriesOf, seriesGroups, pickDisplayCurrency, parseBalanceItems,
+  parseTotalCosts, normalizeZone, zoneParts, zoneOffsetSec, zoneDayStartSec, zoneDayStartSecOf, zoneHourStartSec,
+  zoneGmtLabel, zoneOffsetLabel, setActiveZone, DEFAULT_ZONE,
   aggregateUsageRange, fmtRangeLabel, RANGE_PRESET_DEFS, DEFAULT_PRESET,
   sanitizeBgValue, bgSafeName, bgImagePath, resolveBackground, buildPanelHtml,
-  sanitizeChartColor, hexToHsl, hslToHex, colorLadder, resolveChartConfig, chartColorMap, OFFICIAL_COST_COLORS,
+  sanitizeChartColor, hexToHsl, hslToHex, colorLadder, resolveChartConfigs, sanitizeChartConfig, chartColorsAll, chartColorMap, OFFICIAL_COLORS,
   sanitizeConfigSetting, sanitizeConfigState, CONFIG_SETTING_KEYS, CONFIG_STATE_KEYS,
 } };
