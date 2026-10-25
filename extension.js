@@ -28,6 +28,7 @@ const path = require('path');
 const SECRETS_KEY = 'deepseek-usage-monitor.apiKey';
 const PRESET_STATE_KEY = 'deepseekUsage.rangePreset';   // 面板时间窗口的持久化键
 const SECRETS_TIMEOUT_MS = 2000; // 等待 secrets 响应超时的阈值，超时后降级为内存缓存并报错，API Key 只在本次会话有效
+const REFRESH_MAX_MINUTES = 1440; // 自动刷新间隔上限（一天）；超过 setInterval 的 32 位上限会退化为 1ms
 
 // 面板背景图：文件名存 globalState，文件本体存 globalStorage/background（详见 Dashboard Background 段）
 const BG_IMAGE_KEY = 'deepseekUsage.bgImage';   // 存储名（含内容哈希），同时是 webview URL 的来源
@@ -272,6 +273,13 @@ function humanizeError(msg) {
 }
 
 function pad2(n) { return String(n).padStart(2, '0'); }
+
+// 自动刷新间隔（毫秒）：非正数或非法值 = 关闭；上限 1440 分钟，避免超过 setInterval 的 32 位上限
+function refreshIntervalMs(raw) {
+  const minutes = Number(raw);
+  if (!Number.isFinite(minutes) || minutes <= 0) return 0;
+  return Math.min(minutes, REFRESH_MAX_MINUTES) * 60 * 1000;
+}
 
 // ============================================================
 //  Time Zone —— 默认 UTC+8；可跟随客户端，或由设置指定任意 IANA 时区
@@ -574,6 +582,11 @@ function bucketSecOf(t) {
   if (typeof t === 'number') return Math.floor((t > 1e12 ? t : t * 1000) / 1000);
   if (t == null) return null;
   const str = String(t).trim();
+  // 纯数字字符串按 Unix 秒/毫秒处理；否则会被 Date.parse 当成年份而丢弃
+  if (/^\d+$/.test(str)) {
+    const n = Number(str);
+    return Number.isFinite(n) ? Math.floor(n > 1e12 ? n / 1000 : n) : null;
+  }
   const ms = Date.parse(/[zZ]$|[+-]\d\d:?\d\d$/.test(str) ? str : str.replace(' ', 'T') + '+08:00');
   return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
 }
@@ -1080,7 +1093,7 @@ function sanitizeConfigSetting(shortKey, value) {
       if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
       const out = {};
       CHART_METRICS.forEach((metric) => { if (value[metric]) out[metric] = sanitizeChartConfig(value[metric]); });
-      return Object.keys(out).length ? out : undefined;
+      return out;   // 空对象合法：表示三张图都恢复官方色阶（导出默认配置后可导入重置）
     }
     case 'statusBar.label': {
       const s = String(value == null ? '' : value).replace(/[\r\n\t]+/g, ' ').trim();
@@ -1143,11 +1156,11 @@ function sanitizeConfigState(key, value) {
 
 
 // 三张柱状图的静态描述：外壳按「charts.items」的顺序与取舍生成对应卡片
-// （height 只影响外部尺寸，主图略高；id 与面板脚本的 CHART_DEFS 一一对应）
+// （height 只影响外部尺寸，三张图同高；id 与面板脚本的 CHART_DEFS 一一对应）
 // 三张图的官方色阶各不相同（消费金额为橙→黄梯度，Tokens 为蓝色梯度，请求次数为单色系），
 // 因此同一模型在不同图里的颜色不保证一致
 const CHART_SPECS = {
-  cost: { titleKey: 'costAmount', total: 'chartTotal', legend: 'costLegend', canvas: 'costChart', wrap: 'costWrap', btn: 'colorBtnCost', height: 260, currency: true },
+  cost: { titleKey: 'costAmount', total: 'chartTotal', legend: 'costLegend', canvas: 'costChart', wrap: 'costWrap', btn: 'colorBtnCost', height: 220, currency: true },
   requests: { titleKey: 'apiRequests', total: 'reqTotal', legend: 'reqLegend', canvas: 'reqChart', wrap: 'reqWrap', btn: 'colorBtnReq', height: 220 },
   tokens: { titleKey: 'tokens', total: 'tokTotal', legend: 'tokLegend', canvas: 'tokChart', wrap: 'tokWrap', btn: 'colorBtnTok', height: 220 },
 };
@@ -2236,7 +2249,8 @@ async function activate(context) {
   // 允许留空 —— 此时只显示图标与数据，不显示名称。
   function statusLabel() {
     const raw = config().get('statusBar.label', SB_LABEL_DEFAULT);
-    return String(raw == null ? '' : raw).replace(/[\r\n\t]+/g, ' ').trim();
+    const s = String(raw == null ? '' : raw).replace(/[\r\n\t]+/g, ' ').trim();
+    return Array.from(s).slice(0, SB_LABEL_MAX).join('');   // 直接改 settings.json 时也遵守长度上限
   }
 
   // 拼接状态栏文本：[图标, 名称, 数据] 中为空的部分自动省略，避免多余空格
@@ -2469,9 +2483,9 @@ async function activate(context) {
   function stopAutoRefresh() { if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; } }
   function startAutoRefresh() {
     stopAutoRefresh();
-    const minutes = Number(config().get('refreshInterval', 1));
-    if (!(minutes > 0)) return;
-    refreshTimer = setInterval(() => refresh(undefined, 'auto'), minutes * 60 * 1000);
+    const ms = refreshIntervalMs(config().get('refreshInterval', 1));
+    if (!ms) return;
+    refreshTimer = setInterval(() => refresh(undefined, 'auto'), ms);
   }
 
   // ---- Set API Key flow（命令面板与面板按钮共用）----
@@ -2697,7 +2711,8 @@ async function activate(context) {
     const file = String(picked[0].fsPath || '');
     let parsed;
     try {
-      parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+      // 部分编辑器写出的 UTF-8 文件带 BOM；JSON.parse 会把它当成非法字符
+      parsed = JSON.parse(String(fs.readFileSync(file, 'utf8')).replace(/^\uFEFF/, ''));
     } catch (e) {
       vscode.window.showErrorMessage(e && e.code ? tf('importReadFailed', e.message || e) : t().importBadFile);
       return;
@@ -2822,4 +2837,5 @@ module.exports = { activate, deactivate, __test: {
   sanitizeBgValue, bgSafeName, bgImagePath, resolveBackground, buildPanelHtml,
   sanitizeChartColor, hexToHsl, hslToHex, colorLadder, resolveChartConfigs, sanitizeChartConfig, chartColorsAll, chartColorMap, OFFICIAL_COLORS,
   sanitizeConfigSetting, sanitizeConfigState, CONFIG_SETTING_KEYS, CONFIG_STATE_KEYS,
+  refreshIntervalMs,
 } };

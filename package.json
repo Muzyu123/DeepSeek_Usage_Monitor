@@ -2,7 +2,7 @@
   "name": "deepseek-usage-monitor",
   "displayName": "DeepSeek Usage Monitor & Dashboard",
   "description": "%extension.description%",
-  "version": "3.0.0-beta.1",
+  "version": "3.0.1",
   "publisher": "Muzyu",
   "license": "MIT",
   "icon": "icon.png",
@@ -93,6 +93,7 @@
         "deepseek-usage-monitor.statusBar.label": {
           "type": "string",
           "default": "DeepSeek Usage",
+          "maxLength": 64,
           "markdownDescription": "%config.statusBarLabel.markdownDescription%",
           "order": 7
         },
@@ -106,6 +107,7 @@
           "type": "number",
           "default": 1,
           "minimum": 0,
+          "maximum": 1440,
           "markdownDescription": "%config.refreshInterval.markdownDescription%",
           "order": 9
         },

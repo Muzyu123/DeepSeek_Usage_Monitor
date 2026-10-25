@@ -2,6 +2,17 @@
 
 [简体中文](CHANGELOG.md) ｜ **English**
 
+## 3.0.1 — 2026-10-25
+
+### Fixed
+
+- **Inconsistent bar chart heights**: the Cost chart is now 220px high instead of 260px, so all three charts are the same height
+- **Importing a default-palette configuration could not override the settings**: an empty color object is now accepted as a valid value (all three charts return to the official palette)
+- **No overflow protection for `refreshInterval`**: the auto-refresh interval is now capped at 1 day
+- **No character limit on `statusBar.label`**: the label is now limited to 64 characters
+- **UTF-8 BOM was not handled when importing a configuration**: the BOM is now stripped (explicit `\uFEFF` match), so files saved with a BOM import correctly
+- **Numeric-string timestamps were not recognized**: added a parsing branch for pure-digit strings (Unix seconds or milliseconds)
+
 ## 3.0.0-beta.1 — 2026-10-17
 
 ### Added
